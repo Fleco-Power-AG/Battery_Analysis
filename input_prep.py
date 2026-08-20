@@ -1,5 +1,5 @@
 """
-fill_missing_inputs.py
+input_prep.py
 =======================
 
 Ergaenzt die fehlenden Zeitreihen im Batterie/PV-Analyse-Excel (input.xlsx)
@@ -48,8 +48,17 @@ from openpyxl import load_workbook
 # Konfiguration
 # --------------------------------------------------------------------------
 
-INPUT_PATH = "Inputs.xlsx"
-OUTPUT_PATH = "Input_lp.xlsx"
+# Absoluter Datenordner statt relativer Pfade -- so muss die Excel-Datei NICHT
+# im Git-Repo liegen. Default: derselbe Ordner wie dieses Skript (wo Inputs.xlsx
+# bei euch tatsaechlich liegt); ueber die Umgebungsvariable BATTERIE_DATA_DIR
+# auf einen beliebigen anderen absoluten Pfad umbiegbar, falls sich das
+# spaeter aendert (z.B. `set BATTERIE_DATA_DIR=C:\Pfad\zu\Ordner` unter
+# Windows, oder `export BATTERIE_DATA_DIR=/pfad/zu/ordner` unter Linux/Mac).
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("BATTERIE_DATA_DIR", SCRIPT_DIR)
+
+INPUT_PATH = os.path.join(DATA_DIR, "Inputs.xlsx")
+OUTPUT_PATH = os.path.join(DATA_DIR, "input_lp.xlsx")
 
 ENTSOE_API_KEY = os.environ.get(
     "ENTSOE_API_KEY", "73d39d94-710e-4a11-9160-9f8d98b6047e"
@@ -168,7 +177,14 @@ def fetch_entsoe_day_ahead_prices(
         chunks.append(_parse_entsoe_day_ahead_xml(resp.content))
         cur = chunk_end
 
-    return pd.concat(chunks).sort_index()
+    combined = pd.concat(chunks).sort_index()
+    # Monatsgrenzen ueberlappen sich haeufig um genau einen Zeitpunkt (der
+    # Endzeitpunkt eines Chunks ist zugleich der Startzeitpunkt des naechsten)
+    # -- das erzeugt doppelte Indexwerte, die .reindex() weiter unten zum
+    # Absturz bringen wuerden ("cannot reindex on an axis with duplicate
+    # labels"). Daher hier dedupliziseren, bevor wir den Index weiterreichen.
+    combined = combined[~combined.index.duplicated(keep="first")]
+    return combined
 
 
 def fetch_eur_chf_fx_rates(start_date: str, end_date: str) -> pd.Series:
@@ -179,6 +195,7 @@ def fetch_eur_chf_fx_rates(start_date: str, end_date: str) -> pd.Series:
     resp.raise_for_status()
     data = resp.json()["rates"]
     fx = pd.Series({pd.Timestamp(d): v["CHF"] for d, v in data.items()}).sort_index()
+    fx = fx[~fx.index.duplicated(keep="first")]
     return fx
 
 
