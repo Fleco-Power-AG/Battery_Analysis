@@ -31,7 +31,7 @@ Was das Skript macht (siehe Funktionen unten):
      Rueckliefertarif PV (Zeitreihen!C) und Rueckliefertarif Batterie
      (Zeitreihen!K, NEU) werden UNABHAENGIG vom Bezugstarif nach je EIGENEM
      Schema berechnet (Parameter!C14 bzw. C19): Spot, Fixtarif, RMP oder
-     RMP_Floor (RMP-Monatswerte aus einer separaten Solar_RMP.xlsx) -- siehe
+     RMP_Floor (RMP-Quartalswerte aus einer separaten Solar_RMP.xlsx) -- siehe
      resolve_rueckliefertarif(). Damit koennen PV und Batterie unterschiedlich
      vermarktet werden (z.B. PV per RMP_Floor, Batterie ohne Verguetung).
   3. PV-Produktionsprofil (Zeitreihen!E, "CH_PV_normiert_1kWp") optional via PVGIS
@@ -102,10 +102,16 @@ FX_API_URL = "https://api.frankfurter.app"  # kostenlos, kein Key noetig
 SWISSIX_CSV_SUBDIR = "Input"
 SWISSIX_CSV_FILENAME = "ch_dayahead_2020_26_15min.csv"
 
-# NEU (Beats Wunsch: RMP-Rueckliefertarif fuer PV/Batterie): monatliche
-# RMP-Werte (CHF/kWh) je Jahr liegen in einer separaten Datei, analog zur
-# SwissIX-CSV im selben "Input"-Unterordner, z.B.
+# NEU (Beats Wunsch: RMP-Rueckliefertarif fuer PV/Batterie): RMP-Werte
+# (CHF/kWh) je Jahr liegen in einer separaten Datei, analog zur SwissIX-CSV
+# im selben "Input"-Unterordner, z.B.
 #   <Inputs-Ordner>/Input/Solar_RMP.xlsx
+# NEU (Beats Wunsch 18.9.2026: "fuer RMP und RMP mit Floor nicht den
+# monatlichen RMP nehmen sondern den Quartalsweise, ich habe den im File
+# ergaenzt"): Solar_RMP.xlsx enthaelt seither zusaetzlich zu den (weiterhin
+# vorhandenen, aber nicht mehr gelesenen) Monatszeilen (1-12) auch vier
+# Quartalszeilen ("Q1".."Q4", Q1=Jan-Maerz, Q2=Apr-Jun, Q3=Jul-Sep,
+# Q4=Okt-Dez) -- siehe load_rmp_lookup()/build_rmp_series().
 SOLAR_RMP_SUBDIR = "Input"
 SOLAR_RMP_FILENAME = "Solar_RMP.xlsx"
 
@@ -598,16 +604,23 @@ def build_ht_nt_bezugstarif(
 
 def load_rmp_lookup(path: str) -> dict[tuple[int, int], float]:
     """
-    Liest Beats "Solar_RMP.xlsx" (Sheet 'RMP_Solar'): Spalte A = Monat (1-12),
-    Kopfzeile (Zeile 2) = Jahre, Zellen = RMP-Preis in CHF/kWh fuer diesen
-    Monat/dieses Jahr. Nicht jedes Jahr deckt jeden Monat ab (z.B. weil die
-    Datenreihe erst Mitte eines Jahres beginnt) -- nur tatsaechlich befuellte
-    Zellen landen im Ergebnis-dict.
+    Liest Beats "Solar_RMP.xlsx" (Sheet 'RMP_Solar'): Kopfzeile (Zeile 2) =
+    Jahre. Darunter stehen Zeilenweise sowohl Monatswerte (Spalte A = 1-12)
+    als auch, NEU (Beats Wunsch 18.9.2026: "fuer RMP und RMP mit Floor nicht
+    den monatlichen RMP nehmen sondern den Quartalsweise, ich habe den im
+    File ergaenzt"), Quartalswerte (Spalte A = "Q1".."Q4", Text). Der
+    RMP-Rueckliefertarif nutzt seither NUR NOCH die Quartals-Zeilen (Q1=Jan-
+    Maerz, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Okt-Dez) -- die Monatszeilen bleiben
+    zwar in der Datei stehen (evtl. fuer andere Auswertungen), werden hier
+    aber bewusst NICHT mehr gelesen. Nicht jedes Jahr deckt jedes Quartal ab
+    (z.B. weil die Datenreihe erst waehrend eines Jahres beginnt) -- nur
+    tatsaechlich befuellte Zellen landen im Ergebnis-dict.
 
-    Gibt {(jahr, monat): preis_chf_kwh} zurueck. Wirft FileNotFoundError,
-    falls `path` nicht existiert (RMP-Datei ist -- anders als die SwissIX-CSV
-    -- nicht "optional": wird sie fuer Parameter!C14/C19='RMP'/'RMP_Floor'
-    gebraucht aber fehlt, ist das ein echter Fehler, kein stiller Fallback).
+    Gibt {(jahr, quartal): preis_chf_kwh} zurueck (quartal in 1..4). Wirft
+    FileNotFoundError, falls `path` nicht existiert (RMP-Datei ist -- anders
+    als die SwissIX-CSV -- nicht "optional": wird sie fuer
+    Parameter!C14/C19='RMP'/'RMP_Floor' gebraucht aber fehlt, ist das ein
+    echter Fehler, kein stiller Fallback).
     """
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -625,42 +638,56 @@ def load_rmp_lookup(path: str) -> dict[tuple[int, int], float]:
     if not jahr_spalten:
         raise ValueError(
             f"Solar_RMP.xlsx ({path!r}): in Zeile 2 wurden keine Jahres-Spalten "
-            "gefunden -- erwartetes Format: Spalte A=Monat (1-12), Zeile 2 je "
-            "weitere Spalte ein Jahr (z.B. 2024, 2025, ...)."
+            "gefunden -- erwartetes Format: Spalte A=Monat (1-12) bzw. "
+            "Quartal ('Q1'..'Q4'), Zeile 2 je weitere Spalte ein Jahr (z.B. "
+            "2024, 2025, ...)."
         )
 
     lookup: dict[tuple[int, int], float] = {}
+    quartal_je_label = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
     for row in ws.iter_rows(min_row=3):
-        monat_wert = row[0].value
-        if not isinstance(monat_wert, (int, float)):
+        label_wert = row[0].value
+        if not isinstance(label_wert, str):
             continue
-        monat = int(monat_wert)
+        quartal = quartal_je_label.get(label_wert.strip().upper())
+        if quartal is None:
+            continue
         for idx, jahr in jahr_spalten.items():
             if idx >= len(row):
                 continue
             preis = row[idx].value
             if isinstance(preis, (int, float)):
-                lookup[(jahr, monat)] = float(preis)
+                lookup[(jahr, quartal)] = float(preis)
+    if not lookup:
+        raise ValueError(
+            f"Solar_RMP.xlsx ({path!r}): keine Quartalszeilen ('Q1'..'Q4' in "
+            "Spalte A) mit Werten gefunden -- seit Beats Umstellung auf "
+            "Quartals-RMP wird nur noch dieses Format gelesen (die frueheren "
+            "Monatszeilen 1-12 reichen alleine nicht mehr)."
+        )
     return lookup
 
 
 def build_rmp_series(index: pd.DatetimeIndex, rmp_lookup: dict, label: str) -> pd.Series:
-    """Baut aus dem {(jahr,monat): preis}-Lookup (siehe load_rmp_lookup())
-    eine Zeitreihe auf `index`. Fehlt fuer einen im Szenario vorkommenden
-    Monat/Jahr ein RMP-Wert, wird ein klarer Fehler geworfen (kein stilles
-    Extrapolieren/Nullsetzen -- ein falscher RMP-Wert wuerde direkt die
-    Wirtschaftlichkeitsrechnung verfaelschen)."""
-    jahr_monat = list(zip(index.year, index.month))
-    fehlende = sorted({(j, m) for (j, m) in jahr_monat if (j, m) not in rmp_lookup})
+    """Baut aus dem {(jahr,quartal): preis}-Lookup (siehe load_rmp_lookup())
+    eine Zeitreihe auf `index` -- jeder Zeitschritt wird ueber sein
+    Kalenderquartal (Q1=Jan-Maerz, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Okt-Dez, NEU
+    statt bisher ueber den Monat) nachgeschlagen; alle Zeitschritte
+    desselben Quartals/Jahres erhalten denselben Wert. Fehlt fuer ein im
+    Szenario vorkommendes Quartal/Jahr ein RMP-Wert, wird ein klarer Fehler
+    geworfen (kein stilles Extrapolieren/Nullsetzen -- ein falscher
+    RMP-Wert wuerde direkt die Wirtschaftlichkeitsrechnung verfaelschen)."""
+    jahr_quartal = [(jahr, (monat - 1) // 3 + 1) for jahr, monat in zip(index.year, index.month)]
+    fehlende = sorted({(j, q) for (j, q) in jahr_quartal if (j, q) not in rmp_lookup})
     if fehlende:
-        fehlende_str = ", ".join(f"{m:02d}/{j}" for j, m in fehlende)
+        fehlende_str = ", ".join(f"Q{q}/{j}" for j, q in fehlende)
         raise ValueError(
-            f"Rueckliefertarif_{label}=RMP(_Floor) braucht RMP-Werte aus "
-            f"Solar_RMP.xlsx fuer folgende Monate, die dort fehlen: "
-            f"{fehlende_str}. Bitte Solar_RMP.xlsx ergaenzen oder fuer diesen "
-            "Zeitraum ein anderes Schema waehlen."
+            f"Rueckliefertarif_{label}=RMP(_Floor) braucht Quartals-RMP-Werte "
+            f"aus Solar_RMP.xlsx (Zeilen 'Q1'..'Q4') fuer folgende Quartale, "
+            f"die dort fehlen: {fehlende_str}. Bitte Solar_RMP.xlsx ergaenzen "
+            "oder fuer diesen Zeitraum ein anderes Schema waehlen."
         )
-    werte = [rmp_lookup[(j, m)] for j, m in jahr_monat]
+    werte = [rmp_lookup[(j, q)] for j, q in jahr_quartal]
     return pd.Series(werte, index=index)
 
 
@@ -681,8 +708,9 @@ def resolve_rueckliefertarif(
       - "Spot":      SwissIX +/- Abschlag_Lieferung, OHNE HKN (Beats Vorgabe:
                      "Spot ist Spot ohne HKN").
       - "Fixtarif":  fester Preis + HKN.
-      - "RMP":       RMP-Monatswert (aus Solar_RMP.xlsx) + HKN.
-      - "RMP_Floor": max(RMP-Monatswert, Floor) + HKN.
+      - "RMP":       RMP-Quartalswert (aus Solar_RMP.xlsx, Zeilen "Q1".."Q4",
+                     NEU seit 18.9.2026 statt zuvor Monatswert) + HKN.
+      - "RMP_Floor": max(RMP-Quartalswert, Floor) + HKN.
     HKN kann seinerseits saisonal variieren (1/2/4 Werte, wie HT/NT).
     """
     normalisiert = str(schema).strip() if schema is not None else ""
@@ -1186,7 +1214,7 @@ def main(
             os.path.dirname(os.path.abspath(input_path)), SOLAR_RMP_SUBDIR, SOLAR_RMP_FILENAME
         )
     if os.path.isfile(rmp_path):
-        print(f"Lade RMP-Monatswerte aus {rmp_path} ...")
+        print(f"Lade RMP-Quartalswerte aus {rmp_path} ...")
         rmp_lookup = load_rmp_lookup(rmp_path)
     else:
         print(f"  Solar_RMP.xlsx nicht gefunden unter {rmp_path} -- wird nur gebraucht, falls RMP/RMP_Floor gewaehlt ist.")
