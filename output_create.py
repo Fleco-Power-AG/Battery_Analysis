@@ -1021,15 +1021,31 @@ def _add_logo(fig, ax, logo_img, x_in, y_in, size_in):
               zorder=10, interpolation="bilinear", aspect="auto")
 
 
-def _fleco_page(fig_size, page_title, logo_img):
-    """Baut eine neue Seite im Fleco-Letterhead-Stil: Logo + Seitentitel
-    oben, duenne gruene Trennlinie, Kontakt-Fusszeile unten (Adresse aus
-    Beats Referenzdokument). Gibt (fig, ax, fig_w, fig_h, content_top_in,
-    content_bottom_in) zurueck -- ax ist eine Vollbild-Overlay-Axes mit
-    Koordinaten 0..1 (transAxes), content_top_in/content_bottom_in sind die
-    fuer den eigentlichen Seiteninhalt verfuegbaren Grenzen IN ZOLL (von
-    unten gemessen, wie alle anderen Positionsangaben in dieser Funktion)."""
+def _fleco_page(fig_size, page_title, logo_img, page_no=None):
+    """Baut eine neue Seite im Fleco-Letterhead-Stil: Logo oben, darunter ein
+    durchgehender gruener Titel-Banner (voller Breite, weisser fetter Text),
+    Kontakt-Fusszeile unten (Adresse aus Beats Referenzdokument). Gibt (fig,
+    ax, fig_w, fig_h, content_top_in, content_bottom_in) zurueck -- ax ist
+    eine Vollbild-Overlay-Axes mit Koordinaten 0..1 (transAxes),
+    content_top_in/content_bottom_in sind die fuer den eigentlichen
+    Seiteninhalt verfuegbaren Grenzen IN ZOLL (von unten gemessen, wie alle
+    anderen Positionsangaben in dieser Funktion).
+
+    NEU (Beats Wunsch "Report formeller machen, ein wenig im Style von
+    [Referenzdokument]"): das Referenzdokument nutzt auf JEDER Seite einen
+    vollen gruenen Banner als Titelzeile statt einer duennen Trennlinie unter
+    dem Titel -- hier uebernommen (durchgaengiges Redesign, betrifft ALLE
+    Seiten, da alle ueber diese eine Funktion laufen). Das Logo (farbiges
+    Wordmark-PNG) bleibt bewusst OBERHALB des Banners auf weissem Grund --
+    direkt AUF dem gruenen Banner waere es kaum lesbar (kein Weiss-
+    ausgespartes Logo verfuegbar). `page_no` (optional, z.B. "0", "1", "2"):
+    rechts in der Fusszeile als "Seite N" angezeigt, analog zur "1/4"-Seiten-
+    zahl im Referenzdokument -- Beats Wunsch, dass die bisherige
+    Eingabeparameter-Seite als "Seite 0" gefuehrt wird (die neue System-
+    Zusammenfassung wird dadurch "Seite 1", usw.).
+    """
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
     fig_w, fig_h = fig_size
     fig = plt.figure(figsize=fig_size)
     fig.patch.set_facecolor(_BG)
@@ -1043,14 +1059,17 @@ def _fleco_page(fig_size, page_title, logo_img):
     top_in = fig_h - margin_in
     _add_logo(fig, ax, logo_img, x_in=margin_in, y_in=top_in - logo_h_in, size_in=logo_h_in)
 
-    title_x_in = margin_in + logo_h_in * 2.6
-    ax.text(title_x_in / fig_w, (top_in - logo_h_in / 2) / fig_h, page_title,
-            transform=ax.transAxes, fontsize=16, fontweight="bold", color=_TEXT,
-            va="center", ha="left")
-
-    rule_y_in = top_in - logo_h_in - 0.16
-    ax.plot([margin_in / fig_w, 1 - margin_in / fig_w], [rule_y_in / fig_h] * 2,
-            color=_ACCENT, linewidth=1.6, transform=ax.transAxes, zorder=5)
+    banner_top_in = top_in - logo_h_in - 0.14
+    banner_h_in = 0.42
+    banner_bottom_in = banner_top_in - banner_h_in
+    ax.add_patch(Rectangle(
+        (margin_in / fig_w, banner_bottom_in / fig_h),
+        (fig_w - 2 * margin_in) / fig_w, banner_h_in / fig_h,
+        transform=ax.transAxes, facecolor=_ACCENT, edgecolor="none", zorder=4, clip_on=False,
+    ))
+    ax.text((margin_in + 0.16) / fig_w, (banner_bottom_in + banner_h_in / 2) / fig_h, page_title,
+            transform=ax.transAxes, fontsize=15, fontweight="bold", color="#FFFFFF",
+            va="center", ha="left", zorder=5)
 
     footer_rule_in = 0.46
     ax.plot([margin_in / fig_w, 1 - margin_in / fig_w], [footer_rule_in / fig_h] * 2,
@@ -1059,8 +1078,11 @@ def _fleco_page(fig_size, page_title, logo_img):
             "Fleco Power AG  |  Technoparkstrasse 2  |  8406 Winterthur  |  052 209 04 04  |  "
             "info@flecopower.ch  |  www.flecopower.ch",
             transform=ax.transAxes, fontsize=6.8, color=_TEXT_DIM, va="center", ha="left")
+    if page_no is not None:
+        ax.text(1 - margin_in / fig_w, (footer_rule_in - 0.17) / fig_h, f"Seite {page_no}",
+                transform=ax.transAxes, fontsize=6.8, color=_TEXT_DIM, va="center", ha="right")
 
-    content_top_in = rule_y_in - 0.20
+    content_top_in = banner_bottom_in - 0.22
     content_bottom_in = footer_rule_in + 0.12
     return fig, ax, fig_w, fig_h, content_top_in, content_bottom_in
 
@@ -1110,6 +1132,109 @@ def _section_label(ax, fig_w, fig_h, x_in, y_in, text, size=13):
             fontweight="bold", color=_ACCENT, va="center", ha="left")
 
 
+def _prose_box(ax, fig_w, fig_h, x_in, top_in, width_in, text, fontsize=9.8,
+                line_h_in=0.20, pad_in=0.16):
+    """Hellgraue Info-Box mit Fliesstext (NEU, Beats Wunsch "Report
+    formeller machen ... im Style von [Referenzdokument]"): mirrors die
+    hellgrauen Textboxen im Referenzdokument (z.B. "Ziele der durchgeführten
+    Analysen"). Manueller Zeilenumbruch per `textwrap` (wie schon bei
+    `_kpi_tile()` -- matplotlibs eingebautes `wrap=True` haelt sich nicht
+    zuverlaessig an eine feste Breite, siehe dortiger Kommentar), mit einer
+    an `width_in` orientierten Zeichenbreite. Gibt die neue obere Position
+    (in Zoll) NACH der Box zurueck, fuer nachfolgenden Inhalt."""
+    import textwrap
+    from matplotlib.patches import Rectangle
+    # Empirischer Zeichen-zu-Zoll-Faktor fuer die DejaVu-Sans-Standardschrift
+    # bei `fontsize` -- grosszuegig genug bemessen, um ein Ueberlaufen der
+    # Box (wie beim urspruenglichen KPI-Kachel-Bug) zu vermeiden.
+    zeichen_pro_zoll = 12.5 * (9.8 / fontsize)
+    breite_zeichen = max(20, int((width_in - 2 * pad_in) * zeichen_pro_zoll))
+    zeilen = []
+    for absatz in text.split("\n\n"):
+        zeilen += textwrap.wrap(absatz, width=breite_zeichen) or [""]
+        zeilen.append("")  # Leerzeile zwischen Absaetzen
+    if zeilen and zeilen[-1] == "":
+        zeilen.pop()
+    height_in = len(zeilen) * line_h_in + 2 * pad_in
+    bottom_in = top_in - height_in
+    ax.add_patch(Rectangle(
+        (x_in / fig_w, bottom_in / fig_h), width_in / fig_w, height_in / fig_h,
+        transform=ax.transAxes, facecolor="#F2F2F0", edgecolor="none", zorder=2, clip_on=False,
+    ))
+    y_in = top_in - pad_in - line_h_in * 0.75
+    for zeile in zeilen:
+        ax.text((x_in + pad_in) / fig_w, y_in / fig_h, zeile,
+                transform=ax.transAxes, fontsize=fontsize, color=_TEXT, va="center", ha="left")
+        y_in -= line_h_in
+    return bottom_in - 0.18
+
+
+# NEU (Beats Rueckmeldung zu Seite 2: "bei den Modulen der Tabelle
+# Beschreibung ein Modul pro Zeile und das Modul 'fett' machen, nicht
+# groesser"): Modulname + Kurzbeschreibung als Datentupel, damit
+# _modul_glossar_box() jedes Modul auf einer eigenen Zeile mit fett
+# gesetztem Namen zeichnen kann (statt eines einzigen durchlaufenden
+# Fliesstext-Absatzes wie zuvor).
+_MODUL_GLOSSAR = [
+    ("Eigenverbrauchsoptimierung", "Batterie deckt Last statt Netzbezug."),
+    ("Einspeiseoptimierung", "PV-Energie wird zeitversetzt eingespeist (bei tiefem "
+                             "Rückliefertarif geladen, bei höherem exportiert)."),
+    ("Arbitrage", "Netzenergie wird günstig geladen und teurer exportiert."),
+    ("SRL", "separat vermarktete Sekundärregelleistung."),
+    ("Peak-Shaving", "reduziert die monatliche Bezugsspitze."),
+]
+
+
+def _modul_glossar_box(fig, ax, fig_w, fig_h, x_in, top_in, width_in, module_liste,
+                        fontsize=7.6, line_h_in=None):
+    """Zeichnet je Eintrag aus `module_liste` (Modulname, Beschreibung) EINE
+    eigene Zeile "**Name** = Beschreibung" -- der Name fett (`fontweight=
+    "bold"`), bei GLEICHER Schriftgroesse wie die Beschreibung (Beats
+    Wunsch: "fett machen, nicht groesser"). Eine lange Beschreibung wird
+    (wie bei `_prose_box()`) manuell per `textwrap` umgebrochen; Folgezeilen
+    stehen ohne Einzug unter dem Namen. Da matplotlib keine gemischte Fett-/
+    Normal-Formatierung INNERHALB eines einzigen `ax.text()`-Aufrufs
+    unterstuetzt, wird der Name als eigener Text-Artist gezeichnet und der
+    Rest der ersten Zeile direkt danach positioniert.
+
+    NEU (Fix waehrend des Testrenderns gefunden): die x-Distanz dafuer NICHT
+    ueber den pauschalen Zeichen-zu-Zoll-Faktor annaehern (der ist auf
+    NORMALGEWICHTIGEN Text fuer den Zeilenumbruch kalibriert) -- FETTE
+    Glyphen sind spuerbar breiter, das fuehrte bei laengeren Namen
+    ("Eigenverbrauchsoptimierung") wie auch bei kurzen ("SRL") zu einer
+    unterschaetzten Namensbreite, wodurch der Beschreibungstext (inkl. dem
+    fuehrenden Leerzeichen vor "=") in den fett gezeichneten Namen
+    hineinlief und wie "SRL= separat..." statt "SRL = separat..." aussah.
+    Stattdessen wird die TATSAECHLICH gerenderte Breite des Namens per
+    `Text.get_window_extent()` gemessen (Pixel -> Zoll ueber `fig.dpi`) und
+    der Rest der Zeile exakt daran anschliessend platziert."""
+    import textwrap
+    line_h_in = line_h_in or (fontsize * 1.5 / 72.0)
+    zeichen_pro_zoll = 12.5 * (9.8 / fontsize)
+    breite_zeichen = max(20, int(width_in * zeichen_pro_zoll))
+    y_in = top_in
+    renderer = fig.canvas.get_renderer()
+    for name, beschreibung in module_liste:
+        voller_text = f"{name} = {beschreibung}"
+        zeilen = textwrap.wrap(voller_text, width=breite_zeichen) or [""]
+        erste_zeile = zeilen[0]
+        if erste_zeile.startswith(name):
+            t_name = ax.text(x_in / fig_w, y_in / fig_h, name, transform=ax.transAxes, fontsize=fontsize,
+                              fontweight="bold", color=_TEXT_DIM, va="top", ha="left")
+            name_w_in = t_name.get_window_extent(renderer=renderer).width / fig.dpi
+            ax.text((x_in + name_w_in) / fig_w, y_in / fig_h, erste_zeile[len(name):],
+                    transform=ax.transAxes, fontsize=fontsize, color=_TEXT_DIM, va="top", ha="left")
+        else:
+            ax.text(x_in / fig_w, y_in / fig_h, erste_zeile, transform=ax.transAxes,
+                    fontsize=fontsize, color=_TEXT_DIM, va="top", ha="left")
+        y_in -= line_h_in
+        for folgezeile in zeilen[1:]:
+            ax.text(x_in / fig_w, y_in / fig_h, folgezeile, transform=ax.transAxes,
+                    fontsize=fontsize, color=_TEXT_DIM, va="top", ha="left")
+            y_in -= line_h_in
+    return y_in
+
+
 def _kpi_tile(ax, fig_w, fig_h, x_in, top_in, width_in, height_in, label, value):
     """Eine einzelne Kennzahlen-Kachel (helle Box, grauer Rahmen, Label oben
     dezent, grosse gruene Zahl darunter) -- fuer die Renditebetrachtung.
@@ -1151,11 +1276,20 @@ def _kpi_tile(ax, fig_w, fig_h, x_in, top_in, width_in, height_in, label, value)
 
 
 def _mini_chart_cell(fig, ax, fig_w, fig_h, x_in, top_in, width_in, height_in,
-                      title, title_color, plot_fn, caption=None):
+                      title, title_color, plot_fn, caption=None,
+                      legend_bottom_h_in=0.0, legend_right_w_in=0.0):
     """Eine einzelne Mini-Chart-Zelle im 3x2-Raster von Seite 2: kleiner
     Titel oben (Topic + Ohne/Mit Batterie), darunter eine echte Matplotlib-
     Axes (per `plot_fn(cax)` befuellt), optional eine einzeilige Kennzahl-
-    Caption darunter."""
+    Caption darunter.
+
+    NEU (Beats Rueckmeldung "Netzbezug-Legende ueberlagert den Chart, bitte
+    fix unterhalb"/"Lastspitze-Legende ueberlagert die Balken, bitte fix
+    rechts"): `legend_bottom_h_in`/`legend_right_w_in` reservieren
+    zusaetzlichen Platz UNTERHALB bzw. RECHTS der eigentlichen Chart-Achse,
+    in den die jeweilige `plot_fn` ihre Legende ausserhalb der Achsen-Bbox
+    (per `bbox_to_anchor`) zeichnen kann, statt sie -- wie bisher via
+    `loc="upper right"/"upper center"` -- ÜBER die Daten zu legen."""
     title_h_in = 0.20
     # tick_pad_in reserviert Platz UNTERHALB der Chart-Axes-Bbox fuer deren
     # eigene x-Achsen-Beschriftung (Monatsnamen bzw. rotierte "HH:MM"-Labels
@@ -1167,10 +1301,11 @@ def _mini_chart_cell(fig, ax, fig_w, fig_h, x_in, top_in, width_in, height_in,
     ax.text((x_in + 0.02) / fig_w, (top_in - 0.09) / fig_h, title, transform=ax.transAxes,
             fontsize=9.3, fontweight="bold", color=title_color, va="center", ha="left")
     chart_top_in = top_in - title_h_in
-    chart_bottom_in = top_in - height_in + caption_h_in + tick_pad_in
+    chart_bottom_in = top_in - height_in + caption_h_in + tick_pad_in + legend_bottom_h_in
+    chart_width_in = width_in - legend_right_w_in
     cax = fig.add_axes([
         x_in / fig_w, chart_bottom_in / fig_h,
-        width_in / fig_w, (chart_top_in - chart_bottom_in) / fig_h,
+        chart_width_in / fig_w, (chart_top_in - chart_bottom_in) / fig_h,
     ])
     plot_fn(cax)
     if caption:
@@ -1300,6 +1435,33 @@ SRL_MODUS_LABELS = {
     "ja_optimiert": "Teil der Optimierung",
     "nein": "keine SRL-Vermarktung",
 }
+
+# NEU (Beats Rueckmeldung zu Seite 1 "System-Zusammenfassung": "Bei SRL bitte
+# nur Residual (oder optimiert) angeben"): kuerzere Variante der obigen
+# Labels fuer die knappe Zusammenfassungs-Tabelle -- Seite 0 (Eingabe-
+# parameter) bleibt bei den ausfuehrlichen SRL_MODUS_LABELS.
+_SRL_KURZ_LABELS = {
+    "ja_residual": "Residual",
+    "ja_optimiert": "Optimiert",
+    "nein": "inaktiv",
+}
+
+
+def _ruecklieferung_kurz(params: dict, schema_key: str, fixtarif_key: str, floor_key: str | None = None) -> str:
+    """Kompakte Einzeiler-Darstellung von Vergütungsschema + Tarif fuer die
+    Seite-1-Zusammenfassung (Beats Wunsch: "Vergütungsschema und Tarife der
+    Batterie und Solar angeben") -- eine schlankere Variante der
+    ausfuehrlicheren Zeilen aus build_input_summary_rows()/Seite 0, die dort
+    HKN/Markup als eigene Zeilen aufschluesseln; hier reicht Schema + der
+    fuer dieses Schema massgebliche Tarifwert in EINER Zeile."""
+    schema_wert = params.get(schema_key)
+    schema_norm = str(schema_wert).strip().lower() if schema_wert is not None else ""
+    schema_anzeige = _fmt_param(schema_wert, na="unbekannt")
+    if schema_norm == "fixtarif":
+        return f"{schema_anzeige} ({_fmt_param(params.get(fixtarif_key), 'CHF/kWh', 3)})"
+    if schema_norm == "rmp_floor" and floor_key:
+        return f"{schema_anzeige} (Floor {_fmt_param(params.get(floor_key), 'CHF/kWh', 3)})"
+    return schema_anzeige
 
 
 def build_input_summary_rows(
@@ -1797,23 +1959,73 @@ def build_pdf_report(
         cax.set_xticklabels(labels, fontsize=7)
         cax.set_ylabel("kW", fontsize=8, color=_TEXT_DIM)
         cax.tick_params(labelsize=7)
-        cax.legend(frameon=False, fontsize=7, labelcolor=_TEXT_DIM, loc="upper right")
+        # NEU (Beats Rueckmeldung "Lastspitze-Legende ist nicht gut, fix
+        # rechts der Grafik"): vorher `loc="upper right"` -- lag DIREKT IM
+        # Chart und ueberlagerte dort haeufig die hohen Balken (z.B. Jan/Nov/
+        # Dez). Jetzt fest RECHTS AUSSERHALB der Achse per `bbox_to_anchor`;
+        # der dafuer noetige Platz wird von
+        # `_mini_chart_cell(..., legend_right_w_in=...)` reserviert.
+        cax.legend(frameon=False, fontsize=7.5, labelcolor=_TEXT_DIM,
+                   loc="center left", bbox_to_anchor=(1.02, 0.5), bbox_transform=cax.transAxes)
         _pdf_style_axes(cax)
 
     def _plot_kumulierte_ertraege(cax, kumuliert):
         x = kumuliert.index
-        spalten = list(_ERTRAG_COLORS.keys())
-        ys = [kumuliert[col].values for col in spalten]
-        farben = [_ERTRAG_COLORS[col] for col in spalten]
-        # NEU (Beats Wunsch "kumulierte Erträge ... in additiven
-        # Flächenplots"): echtes additives (gestapeltes) Flaechendiagramm --
-        # jede Flaeche zeigt den kumulierten Ertrag DIESES Moduls, oben auf
-        # der Flaeche des vorherigen Moduls gestapelt, sodass die oberste
-        # Kontur die kumulierte SUMME aller Module zeigt (= operativer
-        # Gesamtertrag bis zu diesem Tag). Duenne Konturlinie in Seitenfarbe
-        # (_BG) zwischen den Flaechen (dataviz-Skill: 2px-Flaechentrennung).
-        cax.stackplot(x, ys, labels=spalten, colors=farben, linewidth=0.6,
-                      edgecolor=_BG, alpha=0.92, zorder=2)
+        alle_spalten = list(_ERTRAG_COLORS.keys())
+
+        # NEU (Beats Rueckmeldung: "die Eigenverbrauchsoptimierung ist
+        # negativ, wieso ist es in der Grafik dann positiv?"): ROOT CAUSE --
+        # matplotlib.stackplot stapelt JEDE uebergebene Reihe additiv, egal
+        # ob ihr Wert positiv oder negativ ist. Ein Modul, dessen kumulierter
+        # Ertrag das ganze Jahr ueber NEGATIV ist (bestaetigt reproduziert:
+        # min/max beide <= 0), wird trotzdem als normale, gefuellte Flaeche
+        # OBEN auf dem Stapel gezeichnet -- optisch nicht von einem echten
+        # positiven Beitrag zu unterscheiden, obwohl es den Gesamtertrag in
+        # Wahrheit SCHMAELERT statt ihn zu vergroessern (bei kleinem Betrag
+        # relativ zur Skala [hier: -354 CHF von ueber 30'000 CHF Total] ist
+        # der eigentliche "Einbruch" der obersten Kontur mit blossem Auge
+        # praktisch nicht erkennbar).
+        #
+        # FIX: Module, die zu IRGENDEINEM Zeitpunkt im Jahr negativ sind,
+        # werden NICHT mehr additiv gestapelt, sondern als eigene, duenne
+        # Linie bei ihrem TATSAECHLICHEN (ggf. negativen) kumulierten Wert
+        # gezeichnet -- so ist auf den ersten Blick sichtbar, dass diese
+        # Linie unterhalb der Null-Achse verlaeuft bzw. den Gesamtertrag
+        # reduziert. Alle uebrigen (durchgehend nicht-negativen) Module
+        # bleiben im additiven Flaechenstapel. Zusaetzlich zeigt JEDES
+        # Legenden-Label den Jahresend-Wert in CHF -- damit ist die Aussage
+        # der Tabelle auf Seite 2 (Wirtschaftlichkeit) IMMER konsistent mit
+        # der Grafik hier, unabhaengig davon, wie fein der Unterschied
+        # optisch sichtbar waere.
+        eps = 1e-6
+        stack_spalten = [c for c in alle_spalten if kumuliert[c].min() >= -eps]
+        linien_spalten = [c for c in alle_spalten if kumuliert[c].min() < -eps]
+
+        def _label_mit_wert(col):
+            endwert = float(kumuliert[col].iloc[-1]) if len(kumuliert) else 0.0
+            return f"{col} ({_fmt_chf(endwert)})"
+
+        if stack_spalten:
+            ys = [kumuliert[c].values for c in stack_spalten]
+            farben = [_ERTRAG_COLORS[c] for c in stack_spalten]
+            labels = [_label_mit_wert(c) for c in stack_spalten]
+            # NEU (Beats Wunsch "kumulierte Erträge ... in additiven
+            # Flächenplots"): echtes additives (gestapeltes) Flaechendiagramm
+            # -- jede Flaeche zeigt den kumulierten Ertrag DIESES Moduls,
+            # oben auf der Flaeche des vorherigen Moduls gestapelt. NUR NOCH
+            # fuer Module, die nie negativ werden (siehe Fix-Kommentar oben)
+            # -- die oberste Kontur zeigt daher die Summe DIESER Module,
+            # NICHT mehr zwingend den gesamten operativen Ertrag (dafuer
+            # steht weiterhin die Textzeile unter dem Chart). Duenne
+            # Konturlinie in Seitenfarbe (_BG) zwischen den Flaechen
+            # (dataviz-Skill: 2px-Flaechentrennung).
+            cax.stackplot(x, ys, labels=labels, colors=farben, linewidth=0.6,
+                          edgecolor=_BG, alpha=0.92, zorder=2)
+
+        for c in linien_spalten:
+            cax.plot(x, kumuliert[c].values, color=_ERTRAG_COLORS[c], linewidth=1.4,
+                      linestyle="--", label=_label_mit_wert(c), zorder=3)
+
         cax.axhline(0, color=_LINE, linewidth=0.7, zorder=1)
         cax.set_ylabel("CHF (kumuliert)", fontsize=8, color=_TEXT_DIM)
         cax.tick_params(labelsize=7)
@@ -1827,9 +2039,10 @@ def build_pdf_report(
         for lbl in cax.get_xticklabels():
             lbl.set_rotation(30)
             lbl.set_ha("right")
-        cax.legend(frameon=False, fontsize=8, labelcolor=_TEXT_DIM, ncol=len(spalten),
+        cax.legend(frameon=False, fontsize=7.5, labelcolor=_TEXT_DIM, ncol=min(3, len(alle_spalten)),
                    loc="upper center")
         _pdf_style_axes(cax)
+        return linien_spalten
 
     def _plot_netzbezug(cax, profil, profil2=None, label2="Netzeinspeisung", ylim=None):
         """profil = Netzbezug-Quartalsprofile (durchgezogene Linien).
@@ -1865,8 +2078,16 @@ def build_pdf_report(
                 mlines.Line2D([0], [0], color=_TEXT_DIM, linewidth=1.3, linestyle="--"),
             ]
             labels += ["Netzbezug", label2]
+        # NEU (Beats Rueckmeldung "Netzbezug-Legende ist nicht gut, eventuell
+        # fix unterhalb der Grafik"): vorher `loc="upper center"` -- lag
+        # DIREKT IM Chart und ueberlagerte dort die Linien (gerade im oberen
+        # Wertebereich, wo die Kurven tagsueber verlaufen). Jetzt fest
+        # UNTERHALB der Achse per `bbox_to_anchor` (Achsen-Koordinaten, y<0
+        # liegt unterhalb der x-Achse) -- der dafuer noetige Platz wird von
+        # `_mini_chart_cell(..., legend_bottom_h_in=...)` reserviert.
         cax.legend(handles, labels, frameon=False, fontsize=6, labelcolor=_TEXT_DIM,
-                   ncol=min(len(labels), 6), loc="upper center")
+                   ncol=min(len(labels), 6), loc="upper center",
+                   bbox_to_anchor=(0.5, -0.42), bbox_transform=cax.transAxes)
         # NEU (Beats Wunsch): gleiche Y-Skala fuer "Ohne"/"Mit Batterie" --
         # siehe Kommentar bei _plot_eigenverbrauch().
         if ylim is not None:
@@ -1883,7 +2104,7 @@ def build_pdf_report(
         # Reports sofort sieht, mit welchen Annahmen er gerechnet wurde,
         # ohne die urspruengliche Inputs.xlsx erneut oeffnen zu muessen.
         fig0, ax0, fig0_w, fig0_h, content0_top_in, content0_bottom_in = _fleco_page(
-            (8.27, 11.69), "Eingabeparameter", logo_img
+            (8.27, 11.69), "Eingabeparameter", logo_img, page_no="0"
         )
         margin0_in = 0.5
         table0_width_in = fig0_w - 2 * margin0_in
@@ -1894,9 +2115,131 @@ def build_pdf_report(
         pdf.savefig(fig0)
         plt.close(fig0)
 
+        # ---- Seite 1 (NEU, Beats Wunsch "Report formeller machen ... auf
+        # der ersten Seite kurz zusammenfassen was alles im System ist"):
+        # kurze System-Zusammenfassung -- ein Fliesstext-Absatz (Zeitraum,
+        # Zweck) gefolgt von einer kompakten, kategorisierten Kennzahlen-
+        # Liste (System/Tarif & Netz/Zusatzerloese), im Stil der "Angaben zu
+        # Verbrauch und Erzeugung"-Box in Beats Referenzdokument. Bewusst
+        # NUR die System-KONFIGURATION (nicht die wirtschaftlichen
+        # Ergebnisse, dafuer steht Seite 2) -- Details zu jedem einzelnen
+        # Parameter bleiben auf der ausfuehrlichen Seite 0.
+        fig1, ax1, fig1_w, fig1_h, content1_top_in, content1_bottom_in = _fleco_page(
+            (8.27, 11.69), "System-Zusammenfassung", logo_img, page_no="1"
+        )
+        margin1_in = 0.5
+        box1_width_in = fig1_w - 2 * margin1_in
+
+        pv_vorhanden_zsf = not _ist_wert_null(params.get("dc_leistung"))
+        last_vorhanden_raw = params.get("last_vorhanden")
+        last_vorhanden_zsf = str(last_vorhanden_raw).strip().lower() == "ja" if last_vorhanden_raw is not None else False
+        zeitraum_txt = (
+            f"{_scenario_start_orig.strftime('%d.%m.%Y')}"
+            f"–{(ts.index[-1]).strftime('%d.%m.%Y')}" if len(ts.index) else "unbekannt"
+        )
+        komponenten = []
+        komponenten.append("einer PV-Anlage" if pv_vorhanden_zsf else None)
+        komponenten.append("einem Batteriespeicher")
+        # NEU (Beats Rueckmeldung "der Lastgang ist nicht simuliert sondern
+        # ist einfach ein Lastgang"): last_profile ist ein ECHTER, von Beat
+        # bereitgestellter Lastgang, keine Simulation -- "simuliert" hier
+        # entfernt (galt ohnehin nur fuer den ZEITRAUM/die Optimierung selbst,
+        # nicht fuer den Lastgang als solchen).
+        komponenten.append("einem Lastgang" if last_vorhanden_zsf else None)
+        komponenten_txt = ", ".join(k for k in komponenten if k)
+
+        zusammenfassung_text = (
+            f"Dieser Bericht vergleicht den Betrieb mit und ohne Batteriespeicher über den "
+            f"Zeitraum {zeitraum_txt} ({wirtschaftlichkeit_titel.split('—')[-1].strip()}). "
+            f"Das analysierte System besteht aus {komponenten_txt}. Untersucht werden die "
+            f"Effekte auf Eigenverbrauch, Netzbezug, Lastspitzen sowie die wirtschaftliche "
+            f"Rendite der Investition; die zugrundeliegenden Annahmen sind im Detail auf "
+            f"Seite 0 (Eingabeparameter) dokumentiert."
+        )
+        content1_top_in = _prose_box(
+            ax1, fig1_w, fig1_h, margin1_in, content1_top_in, box1_width_in, zusammenfassung_text,
+        )
+
+        # NEU (Beats Rueckmeldung): "Last" zeigt statt vorhanden/keine die
+        # tatsaechliche Jahreslast in MWh (Summe last_profile * dt_hours,
+        # aus kWh in MWh umgerechnet) -- fuer ein reines Batterie-System
+        # (kein Lastgang) bleibt es bei "keine".
+        if last_vorhanden_zsf:
+            jahreslast_mwh_zsf = float(np.sum(last_profile.values) * dt_hours) / 1000.0
+            last_wert_zsf = _fmt_param(jahreslast_mwh_zsf, "MWh", 1)
+        else:
+            last_wert_zsf = "keine"
+
+        # NEU (Beats Rueckmeldung "SRL bitte nur Residual/Optimiert und das
+        # Preisschema angeben"): kurzes Label statt des ausfuehrlichen
+        # SRL_MODUS_LABELS-Texts (der bleibt auf Seite 0), Preisschema in
+        # derselben Zeile angehaengt, falls SRL ueberhaupt vermarktet wird.
+        srl_teilnahme_zsf = params.get("srl_teilnahme")
+        srl_normalisiert_zsf = str(srl_teilnahme_zsf).strip().lower() if srl_teilnahme_zsf is not None else ""
+        srl_kurz_zsf = _SRL_KURZ_LABELS.get(srl_normalisiert_zsf, _fmt_param(srl_teilnahme_zsf, na="unbekannt"))
+        if srl_normalisiert_zsf in ("ja_residual", "ja_optimiert"):
+            srl_wert_zsf = f"{srl_kurz_zsf} — Preisschema: {_fmt_param(params.get('srl_preisschema'), na='unbekannt')}"
+        else:
+            srl_wert_zsf = srl_kurz_zsf
+
+        # NEU (Beats Rueckmeldung "bei HT/NT bitte noch die Tarife angeben"):
+        # HT/NT-Tarifzeilen nur, wenn das Bezugstarifschema tatsaechlich
+        # HT_NT ist (analog zur Weiche in build_input_summary_rows()/Seite 0).
+        tarifschema_zsf = params.get("tarifschema")
+        tarifschema_norm_zsf = str(tarifschema_zsf).strip().upper() if tarifschema_zsf is not None else ""
+        ht_nt_rows_zsf = []
+        if tarifschema_norm_zsf == "HT_NT":
+            ht_nt_rows_zsf = [
+                {"label": "HT-Preis", "value": _fmt_saisonal_werte(params.get("ht_preis"), "CHF/kWh", 3)},
+                {"label": "NT-Preis", "value": _fmt_saisonal_werte(params.get("nt_preis"), "CHF/kWh", 3)},
+            ]
+
+        # NEU (Beats Rueckmeldung "Vergütungsschema und Tarife der Batterie
+        # und Solar angeben"): kompakte Einzeiler ueber _ruecklieferung_kurz()
+        # -- Details/HKN weiterhin nur auf Seite 0.
+        pv_verguetung_zsf = _ruecklieferung_kurz(
+            params, "rueckliefer_pv_schema", "rueckliefer_pv_fixtarif", "rueckliefer_pv_floor"
+        )
+        batterie_verguetung_zsf = _ruecklieferung_kurz(
+            params, "rueckliefer_batterie_schema", "rueckliefer_batterie_fixtarif"
+        )
+
+        zsf_rows = [
+            {"label": "System", "style": "header"},
+            {"label": "PV-Anlage", "value": (
+                _fmt_param(params.get("dc_leistung"), "kWp", 1) if pv_vorhanden_zsf else "keine"
+            )},
+            {"label": "Batteriespeicher", "value": (
+                f"{_fmt_param(params.get('leistung'), 'kW')} / {_fmt_param(params.get('kapazitaet'), 'kWh')}"
+            )},
+            {"label": "Batterie — Netzbezug / -abgabe Limiten", "value": (
+                f"{_fmt_param(params.get('max_bezug_batterie'), 'kW')} / "
+                f"{_fmt_param(params.get('max_einspeisung_batterie'), 'kW')}"
+            )},
+            {"label": "Last (Jahreslast)", "value": last_wert_zsf},
+            {"label": "Tarif & Netz", "style": "header"},
+            {"label": "Tarifschema (Bezug)", "value": _fmt_param(params.get("tarifschema"), na="unbekannt")},
+            *ht_nt_rows_zsf,
+            {"label": "Netzanschluss (Bezug / Einspeisung)", "value": (
+                f"{_fmt_param(params.get('max_bezug'), 'kW')} / {_fmt_param(params.get('max_einspeisung'), 'kW')}"
+            )},
+            {"label": "PV-Vergütung (Rücklieferung)", "value": pv_verguetung_zsf} if pv_vorhanden_zsf else None,
+            {"label": "Batterie-Vergütung (Rücklieferung)", "value": batterie_verguetung_zsf},
+            {"label": "Zusätzliche Erlösquellen", "style": "header"},
+            {"label": "Peak-Shaving", "value": (
+                f"aktiv ({_fmt_param(params.get('netznutzung_leistung'), 'CHF/kW/Monat', 2)})"
+                if peakshaving_hat_tarif else "inaktiv"
+            )},
+            {"label": "Sekundärregelleistung (SRL)", "value": srl_wert_zsf},
+        ]
+        zsf_rows = [r for r in zsf_rows if r is not None]
+        _draw_bordered_table(ax1, fig1_w, fig1_h, margin1_in, content1_top_in, box1_width_in, zsf_rows)
+        pdf.savefig(fig1)
+        plt.close(fig1)
+
         # ---- Seite 2: Wirtschaftlichkeit + Renditebetrachtung -------------
         fig, ax, fig_w, fig_h, content_top_in, content_bottom_in = _fleco_page(
-            (8.27, 11.69), "Wirtschaftlichkeit & Renditebetrachtung", logo_img
+            (8.27, 11.69), "Wirtschaftlichkeit & Renditebetrachtung", logo_img, page_no="2"
         )
         margin_in = 0.5
         table_width_in = fig_w - 2 * margin_in
@@ -1964,20 +2307,11 @@ def build_pdf_report(
         # (Amortisationsdauer vs. Jahresergebnis) bleibt bestehen, aber stark
         # gekuerzt, da fuer beides zusammen sonst kein Platz mehr auf der Seite
         # waere.
-        modul_glossar_text = (
-            "Module in der Einnahmen-Tabelle oben: Eigenverbrauchsoptimierung = Batterie deckt Last "
-            "statt Netzbezug. Einspeiseoptimierung = PV-Energie wird zeitversetzt eingespeist (bei "
-            "tiefem Rückliefertarif geladen, bei höherem exportiert). Arbitrage = Netzenergie wird "
-            "günstig geladen und teurer exportiert. SRL = separat vermarktete Sekundärregelleistung. "
-            "Peak-Shaving = reduziert die monatliche Bezugsspitze."
-        )
-        modul_glossar_zeilen = textwrap.wrap(modul_glossar_text, width=100)
-        ax.text(
-            margin_in / fig_w, top_in / fig_h, "\n".join(modul_glossar_zeilen),
-            transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM,
-            va="top", ha="left", style="italic", linespacing=1.5,
-        )
-        top_in -= line_h_in * len(modul_glossar_zeilen) + 0.12
+        # NEU (Beats Rueckmeldung "Module in der Einnahmen-Tabelle oben:
+        # weglassen"): keine Einleitungszeile mehr vor dem Modul-Glossar --
+        # die fett gesetzten Modulnamen darin sind selbsterklaerend genug.
+        top_in = _modul_glossar_box(fig, ax, fig_w, fig_h, margin_in, top_in, table_width_in, _MODUL_GLOSSAR)
+        top_in -= 0.09
 
         methodik_text = (
             "Hinweis zur Methodik: LCOS/Amortisationsdauer/Kapitalverzinsung rechnen ohne die "
@@ -2017,7 +2351,6 @@ def build_pdf_report(
                 transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM,
                 va="top", ha="left", style="italic", linespacing=1.5,
             )
-
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2029,7 +2362,7 @@ def build_pdf_report(
             "Eigenverbrauch, Netzbezug & Lastspitze — Ohne/Mit Batterie im Vergleich"
         )
         fig, ax, fig_w, fig_h, content_top_in, content_bottom_in = _fleco_page(
-            (11.69, 8.27), seite2_titel, logo_img,
+            (11.69, 8.27), seite2_titel, logo_img, page_no="3",
         )
         margin_in = 0.5
         col_gap_in = 0.28
@@ -2038,6 +2371,19 @@ def build_pdf_report(
         content_h_in = content_top_in - content_bottom_in
         row_h_in = (content_h_in - 2 * row_gap_in) / 3
         voll_breite_in = fig_w - 2 * margin_in
+
+        # NEU (Beats Rueckmeldung "Legenden ueberlagern die Grafiken"):
+        # reservierter Zusatzplatz fuer die Netzbezug-Legende UNTERHALB
+        # bzw. die Lastspitze-Legende RECHTS der jeweiligen Chart-Achse
+        # (siehe _mini_chart_cell()/_plot_netzbezug()/_plot_peak_combined()
+        # oben). Werte empirisch per Testrender ermittelt: die Netzbezug-
+        # Legende ist bei `bbox_to_anchor=(0.5, -0.42)` eine einzeilige
+        # Legende (fontsize 6) -- 0.42in Puffer reicht fuer den Abstand
+        # plus die Legendenbox selbst. Die Lastspitze-Legende hat nur zwei
+        # Eintraege ("Ohne"/"Mit Batterie", fontsize 7.5) vertikal gestapelt
+        # rechts der Achse -- 1.15in reicht fuer den laengeren Text.
+        _NETZBEZUG_LEGEND_H_IN = 0.42
+        _LASTSPITZE_LEGEND_W_IN = 1.15
 
         if nur_batterie:
             # NEU (Beats Wunsch): reines Batterie-System -- kein Ohne/Mit-
@@ -2078,12 +2424,14 @@ def build_pdf_report(
                 title="Netzbezug — Tagesprofil je Quartal — Mit Batterie", title_color=_ACCENT,
                 plot_fn=lambda cax: _plot_netzbezug(cax, profil_mit),
                 caption=f"Ø Netzbezug: {np.nanmean(profil_mit.values):,.1f} kW",
+                legend_bottom_h_in=_NETZBEZUG_LEGEND_H_IN,
             )
             _mini_chart_cell(
                 fig, ax, fig_w, fig_h, margin_in + col_w_in + col_gap_in, row_top_in, col_w_in, row_h_in,
                 title="Netzeinspeisung — Tagesprofil je Quartal — Mit Batterie", title_color=_ACCENT,
                 plot_fn=lambda cax: _plot_netzbezug(cax, profil_einspeisung_mit),
                 caption=f"Ø Netzeinspeisung: {np.nanmean(profil_einspeisung_mit.values):,.1f} kW",
+                legend_bottom_h_in=_NETZBEZUG_LEGEND_H_IN,
             )
             row_top_in -= row_h_in + row_gap_in
 
@@ -2142,6 +2490,7 @@ def build_pdf_report(
             zeilen_zweispaltig = [
                 {
                     "titel": "Eigenverbrauch & Rueckspeisung pro Monat",
+                    "legend_bottom_h_in": 0.0,
                     "ohne": {"plot": lambda cax: _plot_eigenverbrauch(
                                  cax, monatstabelle_ohne, _GRAU, _GRAU2, einheit_divisor, einheit_label,
                                  ylim=ev_ylim),
@@ -2153,6 +2502,13 @@ def build_pdf_report(
                 },
                 {
                     "titel": "Netzbezug & Netzeinspeisung — Tagesprofil je Quartal",
+                    # NEU: diese Zeile nutzt _plot_netzbezug() MIT profil2
+                    # (Netzbezug + Netzeinspeisung ueberlagert) -- die Legende
+                    # braucht daher reservierten Platz UNTERHALB der Achse
+                    # (siehe _NETZBEZUG_LEGEND_H_IN oben). Die Eigenverbrauch-
+                    # Zeile oben zeichnet ihre (kurze) Legende weiterhin IM
+                    # Chart, dort besteht kein Ueberlagerungsproblem.
+                    "legend_bottom_h_in": _NETZBEZUG_LEGEND_H_IN,
                     "ohne": {"plot": lambda cax: _plot_netzbezug(
                                  cax, profil_ohne, profil_einspeisung_ohne, ylim=netzbezug_ylim),
                              "caption": (
@@ -2187,6 +2543,7 @@ def build_pdf_report(
                         fig, ax, fig_w, fig_h, x_in, row_top_in, col_w_in, row_h_in,
                         title=f"{zeile['titel']} — {label}", title_color=farbe,
                         plot_fn=cell["plot"], caption=cell["caption"],
+                        legend_bottom_h_in=zeile.get("legend_bottom_h_in", 0.0),
                     )
                     x_in += col_w_in + col_gap_in
                 row_top_in -= row_h_in + row_gap_in
@@ -2196,6 +2553,7 @@ def build_pdf_report(
                 title="Monatliche Lastspitze — Ohne/Mit Batterie im Vergleich", title_color=_ACCENT,
                 plot_fn=lambda cax: _plot_peak_combined(cax, peak_tabelle_ohne, peak_tabelle),
                 caption=peak_caption,
+                legend_right_w_in=_LASTSPITZE_LEGEND_W_IN,
             )
 
         pdf.savefig(fig)
@@ -2206,22 +2564,34 @@ def build_pdf_report(
         # Werte hätte ich gerne die kumulierten Erträge der einzelnen
         # Bereiche ... in additiven Flächenplots") ------------------------
         fig, ax, fig_w, fig_h, content_top_in, content_bottom_in = _fleco_page(
-            (11.69, 8.27), "Kumulierte Erträge je Modul", logo_img,
+            (11.69, 8.27), "Kumulierte Erträge je Modul", logo_img, page_no="4",
         )
         margin_in = 0.6
         # tick_pad_in reserviert Platz UNTERHALB der Chart-Axes-Bbox fuer die
         # rotierten "TT.MM.JJ"-Datums-Ticks (matplotlib zeichnet Tick-Labels
         # AUSSERHALB der Axes-Bbox, analog zu _mini_chart_cell() oben);
         # caption_h_in reserviert zusaetzlich Platz DARUNTER fuer die
-        # Total-Zeile, sonst kollidieren beide (siehe erste Test-Iteration).
+        # Total-/Hinweis-Zeile(n), sonst kollidieren beide (siehe erste
+        # Test-Iteration). ZWEIZEILIG, wenn mind. ein Modul negativ ist (NEU,
+        # siehe Fix-Kommentar in _plot_kumulierte_ertraege) -- eine Zeile
+        # reichte dafuer nicht (lief in einem Testrender rechts aus der
+        # Seite), daher eigene zweite Zeile statt eines noch laengeren
+        # Einzeilers.
         tick_pad_in = 0.42
-        caption_h_in = 0.26
+        # NEU: vorab (unabhaengig vom eigentlichen Plot-Aufruf unten) pruefen,
+        # ob mind. ein Modul negativ wird -- dann braucht die Fussnote eine
+        # zweite Zeile und damit mehr reservierten Platz (siehe
+        # _plot_kumulierte_ertraege fuer dieselbe Pruefung/denselben Epsilon).
+        _hat_negativ_modul = any(
+            kumulierte_ertraege[c].min() < -1e-6 for c in kumulierte_ertraege.columns
+        ) if len(kumulierte_ertraege) else False
+        caption_h_in = 0.36 if _hat_negativ_modul else 0.26
         chart_bottom_in = content_bottom_in + tick_pad_in + caption_h_in
         cax4 = fig.add_axes([
             margin_in / fig_w, chart_bottom_in / fig_h,
             (fig_w - 2 * margin_in) / fig_w, (content_top_in - chart_bottom_in) / fig_h,
         ])
-        _plot_kumulierte_ertraege(cax4, kumulierte_ertraege)
+        negativ_module = _plot_kumulierte_ertraege(cax4, kumulierte_ertraege)
 
         total_kumuliert = (
             float(kumulierte_ertraege.iloc[-1].sum()) if len(kumulierte_ertraege) else 0.0
@@ -2229,12 +2599,30 @@ def build_pdf_report(
         letzter_tag = (
             kumulierte_ertraege.index[-1].strftime("%d.%m.%Y") if len(kumulierte_ertraege) else "--"
         )
-        ax.text(
-            margin_in / fig_w, content_bottom_in / fig_h,
+        zeile1 = (
             f"Kumulierter operativer Gesamtertrag per {letzter_tag}: {_fmt_chf(total_kumuliert)} "
-            "(Summe aller Module, ohne Kapitalkosten/Amortisation — siehe Wirtschaftlichkeit Seite 2)",
+            "(Summe aller Module, ohne Kapitalkosten/Amortisation — siehe Wirtschaftlichkeit Seite 2)"
+        )
+        ax.text(
+            margin_in / fig_w, (content_bottom_in + (0.16 if negativ_module else 0.0)) / fig_h,
+            zeile1,
             transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM, va="bottom", ha="left",
         )
+        # NEU (Beats Rueckmeldung, siehe Fix-Kommentar in
+        # _plot_kumulierte_ertraege): Module, die als eigene (gestrichelte,
+        # ggf. negative) Linie statt als Teil der Flaeche gezeichnet werden,
+        # hier in einer EIGENEN zweiten Zeile explizit benennen -- sonst
+        # bleibt unklar, warum sie nicht Teil des additiven Stapels sind.
+        if negativ_module:
+            zeile2 = (
+                f"{', '.join(negativ_module)}: negativer Jahreswert, daher als gestrichelte "
+                "Linie statt additive Fläche dargestellt (siehe Legende oben)."
+            )
+            ax.text(
+                margin_in / fig_w, content_bottom_in / fig_h,
+                zeile2,
+                transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM, va="bottom", ha="left",
+            )
 
         pdf.savefig(fig)
         plt.close(fig)
