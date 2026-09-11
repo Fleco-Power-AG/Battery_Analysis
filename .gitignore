@@ -1,26 +1,16 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
-# Ignore virtual environment and common Python artifacts, but allow project files
-# Ignore the local venv directory that was used in this workspace
-batterieanalyse/
-# Byte-compiled / cache
-__pycache__/
-*.py[cod]
+# Nur diese Ordner werden getrackt: Code, Dokumente, Input, Vorlagen
+# Alles andere im Root wird ignoriert (Output, lose PDFs/Excels, venv usw.)
+/*
+!/Code/
+!/Dokumente/
+!/Input/
+!/Vorlagen/
 
-# Distribution / packaging
-.Python
-env/
-venv/
-ENV/
-env.bak/
-
-# VS Code
-.vscode/
-
-# Optional: ignore Excel outputs but keep scripts
-*.xlsx
-
-# Allow these project source files explicitly
-!input_prep.py
-!run_battery_analysis.py
-!output_create.py
-!battery_optimization.py
+# Im Code-Ordner: nur die 4 Skripte, das Logo und die .bat-Datei
+/Code/*
+!/Code/input_prep.py
+!/Code/run_battery_analysis.py
+!/Code/output_create.py
+!/Code/battery_optimization.py
+!/Code/fleco_logo.png
+!/Code/*.bat
