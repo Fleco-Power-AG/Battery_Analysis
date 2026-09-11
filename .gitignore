@@ -21,3 +21,6 @@ env.bak/
 
 # Allow these project source files explicitly
 !input_prep.py
+!run_battery_analysis.py
+!output_create.py
+!battery_optimization.py
