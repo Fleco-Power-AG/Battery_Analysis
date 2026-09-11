@@ -1,6 +1,0 @@
-{
-    "python.defaultInterpreterPath": "C:\\Users\\BeatFaasFlecoPowerAG\\anaconda3\\envs\\batterie_analyse\\python.exe",
-    "python.terminal.activateEnvironment": true,
-    "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
-}
