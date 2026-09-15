@@ -1,0 +1,17 @@
+First time:
+
+**Installation**
+1. Miniconda installieren: https://docs.conda.io/en/latest/miniconda.html
+2. Repo klonen:
+   git clone <dein-repo-url>
+   cd <repo-ordner>
+3. setup.bat doppelklicken (erstellt das Environment "batterieanalyse")
+
+
+** Batterieanalyse laufen lasse**
+1. Input Excel für Konfiguration erstellen:
+	1.1 gewünschtes Setup aus dem Ordner "Vorlagen" kopieren in den Hauptordner
+	1.2 Inputs im Excel anpassen
+2. run_battery_analysis.bat doppelklicken -> im Pop-up das gewünschte Excel auswählen als Input
+3. Output validieren / Report anschauen
+
