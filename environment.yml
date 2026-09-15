@@ -1,0 +1,13 @@
+name: batterieanalyse
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - coincbc
+  - pandas
+  - numpy
+  - openpyxl
+  - requests
+  - pip
+  - pip:
+      - oemof.solph
