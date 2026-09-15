@@ -1,0 +1,102 @@
+Solver command line: ['C:\\Users\\BeatFaasFlecoPowerAG\\anaconda3\\envs\\batterie_analyse\\Library\\bin\\cbc.exe', '-printingOptions', 'all', '-import', 'C:\\Users\\BEATFA~1\\AppData\\Local\\Temp\\tmpq19pk5w_.pyomo.lp', '-stat=1', '-solve', '-solu', 'C:\\Users\\BEATFA~1\\AppData\\Local\\Temp\\tmpq19pk5w_.pyomo.soln']
+
+Welcome to the CBC MILP Solver 
+Version: 2.10.13 
+Build Date: May 12 2026 
+
+command line - C:\Users\BeatFaasFlecoPowerAG\anaconda3\envs\batterie_analyse\Library\bin\cbc.exe -printingOptions all -import C:\Users\BEATFA~1\AppData\Local\Temp\tmpq19pk5w_.pyomo.lp -stat=1 -solve -solu C:\Users\BEATFA~1\AppData\Local\Temp\tmpq19pk5w_.pyomo.soln (default strategy 1)
+Option for printingOptions changed from normal to all
+Presolve 18631 (-542011) rows, 55528 (-680324) columns and 74158 (-1397522) elements
+Statistics for presolved model
+
+
+Problem has 18631 rows, 55528 columns (36898 with objective) and 74158 elements
+There are 36898 singletons with objective 
+Column breakdown:
+0 of type 0.0->inf, 35005 of type 0.0->up, 0 of type lo->inf, 
+20523 of type lo->up, 0 of type free, 0 of type fixed, 
+0 of type -inf->0.0, 0 of type -inf->up, 0 of type 0.0->1.0 
+Row breakdown:
+364 of type E 0.0, 0 of type E 1.0, 0 of type E -1.0, 
+18267 of type E other, 0 of type G 0.0, 0 of type G 1.0, 
+0 of type G other, 0 of type L 0.0, 0 of type L 1.0, 
+0 of type L other, 0 of type Range 0.0->1.0, 0 of type Range other, 
+0 of type Free 
+Presolve 18631 (-542011) rows, 55528 (-680324) columns and 74158 (-1397522) elements
+Perturbing problem by 0.001% of 0.14519805 - largest nonzero change 1.0157949e-06 ( 0.0019856919%) - largest zero change 1.0157588e-06
+0  Obj -623.2641 Primal inf 304302.24 (18267) Dual inf 2991.0414 (36898)
+318  Obj -86131.487 Primal inf 831761.38 (18627)
+636  Obj -86116.976 Primal inf 843732.81 (18614)
+954  Obj -86052.806 Primal inf 949131.06 (18591)
+1272  Obj -85205.512 Primal inf 965202.87 (18338)
+1590  Obj -84354.699 Primal inf 1001591.6 (18161)
+1908  Obj -82984.519 Primal inf 896348.13 (17816)
+2226  Obj -82446.008 Primal inf 1061252.2 (17684)
+2544  Obj -81033.776 Primal inf 916298.89 (17328)
+2862  Obj -80144.148 Primal inf 957630.01 (17114)
+3180  Obj -79341.401 Primal inf 997133.97 (16878)
+3498  Obj -78378.059 Primal inf 972882.3 (16578)
+3816  Obj -77347.526 Primal inf 1034011.8 (16358)
+4134  Obj -76204.188 Primal inf 970266.62 (16055)
+4452  Obj -75086.004 Primal inf 974674.25 (15823)
+4770  Obj -73988.258 Primal inf 905798.4 (15539)
+5088  Obj -72943.625 Primal inf 931227.41 (15304)
+5406  Obj -71901.969 Primal inf 975824.16 (15054)
+5724  Obj -70859.371 Primal inf 918617.88 (14783)
+6042  Obj -69657.919 Primal inf 869407.58 (14490)
+6360  Obj -68860.466 Primal inf 973889.58 (14307)
+6678  Obj -67786.388 Primal inf 965956.31 (14041)
+6996  Obj -66649.941 Primal inf 892648.52 (13727)
+7314  Obj -65479.305 Primal inf 898404.26 (13457)
+7632  Obj -64434.226 Primal inf 894410.29 (13186)
+7950  Obj -63493.507 Primal inf 929616.05 (12948)
+8268  Obj -62323.663 Primal inf 884763.78 (12663)
+8586  Obj -61112.564 Primal inf 807235.88 (12363)
+8904  Obj -60156.148 Primal inf 847801.43 (12176)
+9222  Obj -59199.307 Primal inf 897931.62 (11947)
+9540  Obj -58149.407 Primal inf 830428.57 (11667)
+9858  Obj -57227.562 Primal inf 847482.14 (11407)
+10176  Obj -56295.068 Primal inf 899997.61 (11184)
+10494  Obj -55015.116 Primal inf 803277.21 (10842)
+10812  Obj -53915.854 Primal inf 792455.73 (10571)
+11130  Obj -52981.605 Primal inf 817144.47 (10392)
+11448  Obj -51925.599 Primal inf 822874.45 (10132)
+11766  Obj -50699.844 Primal inf 780438.51 (9832)
+12084  Obj -49945.799 Primal inf 884033.8 (9648)
+12402  Obj -48716.13 Primal inf 869524.27 (9373)
+12720  Obj -47590.994 Primal inf 761642.35 (9087)
+13038  Obj -46633.606 Primal inf 780164 (8828)
+13356  Obj -45801 Primal inf 795064.04 (8585)
+13674  Obj -44530.343 Primal inf 756948.39 (8322)
+13992  Obj -43445.611 Primal inf 767779.88 (8079)
+14310  Obj -42401.908 Primal inf 802578.36 (7863)
+14628  Obj -41465.235 Primal inf 834899.15 (7630)
+14946  Obj -40181.808 Primal inf 757432.79 (7322)
+15264  Obj -39278.412 Primal inf 819726.75 (7085)
+15582  Obj -38107.699 Primal inf 732193.77 (6757)
+15900  Obj -36790.092 Primal inf 718930.45 (6501)
+16218  Obj -35846.971 Primal inf 803708.59 (6278)
+16536  Obj -34655.825 Primal inf 733912.96 (6012)
+16854  Obj -33366.069 Primal inf 691498.67 (5730)
+17172  Obj -32464.005 Primal inf 690017.75 (5498)
+17490  Obj -31483.463 Primal inf 703522.97 (5272)
+17808  Obj -30512.566 Primal inf 718349.9 (5024)
+18126  Obj -29604.549 Primal inf 720591.69 (4762)
+18444  Obj -28862.497 Primal inf 676110.08 (4461)
+18762  Obj -28214.083 Primal inf 504862.51 (3665)
+19080  Obj -28024.625 Primal inf 269338.08 (2469)
+19398  Obj -28024.506 Primal inf 62936.234 (1332)
+19716  Obj -28024.494 Primal inf 36692.382 (888)
+20034  Obj -28024.481 Primal inf 24273.085 (589)
+20352  Obj -28024.432 Primal inf 12537.088 (307)
+20670  Obj -28024.278 Primal inf 3747.0717 (91)
+20988  Obj -28023.772 Primal inf 360.68146 (8)
+21306  Obj -28023.167 Primal inf 353.18556 (6)
+21624  Obj -28022.589 Primal inf 353.18556 (6)
+21881  Obj -28019.422
+Optimal - objective value -28020.549
+After Postsolve, objective -28020.549, infeasibilities - dual 0 (0), primal 0 (0)
+Optimal objective -28020.54855 - 21881 iterations time 1.512, Presolve 0.96
+Total time (CPU seconds):       5.90   (Wallclock seconds):       5.90
+
+

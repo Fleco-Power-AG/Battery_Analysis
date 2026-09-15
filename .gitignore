@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Python Environments
+venv/
+.venv/
+env/
+
+# Excel Temporärdateien
+~$*.xlsx
+
+# Output komplett ignorieren
+Output/
