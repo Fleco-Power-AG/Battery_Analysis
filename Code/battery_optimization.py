@@ -19,7 +19,7 @@ SOLVER-Konstante unten und Setup-Hinweis) laufen lassen und mir
 Fehlermeldungen zurueckmelden -- dann kann ich gezielt nachbessern.
 Kandidaten fuer API-Abweichungen je nach genauer oemof-Version, auf die beim
 Testen besonders zu achten ist (Kommentare an den jeweiligen Stellen im Code):
-  - `Flow(custom_attributes={...})` fuer generic_integral_limit
+  - `Flow(custom_properties={...})` fuer generic_integral_limit
   - `om.objective.expr = om.objective.expr + ...` zum Erweitern der
     Zielfunktion (siehe main(): NUR NOCH EIN EINZIGES Mal aufgerufen, NICHT
     mehr mehrfach `+=` -- Root-Cause-Fix-VERSUCH eines echten CBC-Absturzes
@@ -124,11 +124,25 @@ from __future__ import annotations
 import datetime as dt
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
 import pyomo.environ as po
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+# NEU (Beat, 18.9.2026: "wie werde ich das UserWarning los?"): openpyxl meldet
+# beim Einlesen JEDER .xlsx-Datei mit Dropdown-Validierungen (Data Validation,
+# z.B. Beats "Ja"/"Nein"-Felder) diese harmlose Warnung -- die Validierung
+# selbst bleibt beim reinen Lesen unberuehrt, nur openpyxls eigene Faehigkeit,
+# sie beim SPEICHERN zu erhalten, ist eingeschraenkt (betrifft hier nicht:
+# battery_optimization.py speichert keine Excel-Datei). Bewusst NUR diese eine,
+# namentlich passende Meldung unterdrueckt (kein pauschales `ignore` aller
+# UserWarnings), damit andere, tatsaechlich relevante Warnungen sichtbar bleiben.
+warnings.filterwarnings(
+    "ignore", message=r".*Data Validation extension is not supported.*", category=UserWarning
+)
 
 import oemof.solph as solph
 
@@ -383,11 +397,45 @@ def read_inputs(path: str = INPUT_PATH):
     zeit = pd.date_range(start=zeit_raw[0], periods=len(zeit_raw), freq="15min")
     index = pd.DatetimeIndex(zeit).tz_localize(CET_FIXED)
 
+    # NEU (Beat, 18.9.2026, Absturz "ValueError: could not convert string to
+    # float: '#N/A'" bei Inputs_BAT_PV_ohneLaden.xlsx): Zeitreihen-Spalten
+    # koennen einen rohen Excel-Fehlerwert (z.B. '#N/A' aus einer noch nicht
+    # aufloesbaren XLOOKUP-Formel) enthalten, dessen gecachter Wert beim
+    # Baken (input_prep.py::bake_formula_cells()) als LITERALER STRING
+    # uebernommen wird -- pd.Series(..., dtype=float) stuerzt darauf bisher
+    # mit einer kryptischen, spaltenlosen Fehlermeldung ab. Fix: VOR der
+    # float-Konvertierung explizit auf bekannte Excel-Fehlerwerte pruefen und
+    # eine klare Meldung werfen, die Spalte/Zeile nennt (plus einen
+    # spezifischen Hinweis fuer die PV-Normiert-Spalte, siehe
+    # fetch_pv_reference_profile() in input_prep.py).
+    _EXCEL_FEHLERWERTE = {"#N/A", "#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#NULL!", "#NUM!"}
+
     def col(c):
-        return pd.Series(
-            [wsZ.cell(row=r, column=c).value for r in range(2, n_rows + 1)],
-            index=index, dtype=float,
-        )
+        rohwerte = [wsZ.cell(row=r, column=c).value for r in range(2, n_rows + 1)]
+        fehlerhafte = [
+            (r, v) for r, v in zip(range(2, n_rows + 1), rohwerte)
+            if isinstance(v, str) and v.strip().upper() in _EXCEL_FEHLERWERTE
+        ]
+        if fehlerhafte:
+            spalte_buchstabe = get_column_letter(c)
+            erste_zeile, erster_wert = fehlerhafte[0]
+            hinweis = ""
+            if c == COL_PV_NORMIERT:
+                hinweis = (
+                    " Das ist vermutlich das PV-Referenzprofil (Spalte E), das "
+                    "input_prep.py bewusst NICHT automatisch befuellt, solange "
+                    "Standort/Ausrichtung noch nicht final sind (siehe Excel-"
+                    "Kommentar 'mail Urs/Astrid'). Sobald bekannt: input_prep."
+                    "main(input_path=..., fetch_pv=True, pv_lat=..., pv_lon=...) "
+                    "erneut aufrufen -- dann wird Spalte E automatisch mit einem "
+                    "echten PVGIS-Profil befuellt."
+                )
+            raise RuntimeError(
+                f"Zeitreihen!{spalte_buchstabe} enthaelt {len(fehlerhafte)} Excel-"
+                f"Fehlerwert(e) (z.B. '{erster_wert}' in Zeile {erste_zeile}) statt "
+                f"Zahlen -- kann nicht eingelesen werden.{hinweis}"
+            )
+        return pd.Series(rohwerte, index=index, dtype=float)
 
     zeitreihen = pd.DataFrame(
         {
@@ -622,14 +670,14 @@ def build_energysystem(
     # --- Quellen -------------------------------------------------------------
     src_pv = solph.components.Source(
         label="pv",
-        outputs={b_pv: solph.Flow(nominal_value=1, fix=pv_profile.values)},
+        outputs={b_pv: solph.Flow(nominal_capacity=1, fix=pv_profile.values)},
     )
 
     src_netz = solph.components.Source(
         label="netz",
         outputs={
             b_netzbezug: solph.Flow(
-                nominal_value=params["max_bezug"],
+                nominal_capacity=params["max_bezug"],
                 variable_costs=zeitreihen["bezugstarif"].values,
             )
         },
@@ -638,7 +686,7 @@ def build_energysystem(
     # --- Senken --------------------------------------------------------------
     snk_last = solph.components.Sink(
         label="last",
-        inputs={b_ac: solph.Flow(nominal_value=1, fix=last_profile.values)},
+        inputs={b_ac: solph.Flow(nominal_capacity=1, fix=last_profile.values)},
     )
 
     # NEU: b_export (nicht mehr b_ac, siehe Kommentar bei b_export oben) --
@@ -648,7 +696,7 @@ def build_energysystem(
     snk_export = solph.components.Sink(
         label="export",
         inputs={
-            b_export: solph.Flow(nominal_value=params["max_einspeisung"])
+            b_export: solph.Flow(nominal_capacity=params["max_einspeisung"])
         },
     )
 
@@ -679,7 +727,7 @@ def build_energysystem(
     snk_curtailment = solph.components.Sink(
         label="pv_abregelung",
         inputs={
-            b_pv: solph.Flow() if pv_abschaltung_erlaubt else solph.Flow(nominal_value=0)
+            b_pv: solph.Flow() if pv_abschaltung_erlaubt else solph.Flow(nominal_capacity=0)
         },
     )
 
@@ -690,7 +738,7 @@ def build_energysystem(
     link_pv_ac = solph.components.Converter(
         label="pv_zu_ac",
         inputs={b_pv: solph.Flow()},
-        outputs={b_ac: solph.Flow(nominal_value=params["dc_leistung"])},
+        outputs={b_ac: solph.Flow(nominal_capacity=params["dc_leistung"])},
         conversion_factors={b_ac: 1.0},
     )
     # NEU: direkter PV-Export-Pfad (b_pv -> b_export), bepreist mit dem
@@ -702,7 +750,7 @@ def build_energysystem(
         inputs={b_pv: solph.Flow()},
         outputs={
             b_export: solph.Flow(
-                nominal_value=params["dc_leistung"],
+                nominal_capacity=params["dc_leistung"],
                 variable_costs=-zeitreihen["rueckliefertarif"].values,
             )
         },
@@ -711,12 +759,12 @@ def build_energysystem(
     link_pv_charge = solph.components.Converter(
         label="pv_zu_ladebus",
         inputs={b_pv: solph.Flow()},
-        outputs={b_ladebus: solph.Flow(nominal_value=params["leistung"])},
+        outputs={b_ladebus: solph.Flow(nominal_capacity=params["leistung"])},
         conversion_factors={b_ladebus: 1.0},
     )
     # WICHTIG: Netzbezug->AC ist NICHT einfach mit max_bezug gekappt, sondern
-    # zeitschritt-genau auf die aktuelle Last begrenzt (nominal_value=1,
-    # max=last_profile.values, d.h. Fluss(t) <= last_profile(t)). Grund (aus
+    # zeitschritt-genau auf die aktuelle Last begrenzt (nominal_capacity=1,
+    # maximum=last_profile.values, d.h. Fluss(t) <= last_profile(t)). Grund (aus
     # einem echten Testlauf entdeckt): mit einer flachen max_bezug-Kappe kann
     # die Optimierung bei NEGATIVEM Bezugstarif (kommt in den SwissIX-Daten
     # vor, siehe Arbitrage-Diagnose in main()) beliebig viel "gratis" Netz-
@@ -734,7 +782,7 @@ def build_energysystem(
     link_netz_ac = solph.components.Converter(
         label="netzbezug_zu_ac",
         inputs={b_netzbezug: solph.Flow()},
-        outputs={b_ac: solph.Flow(nominal_value=1, max=last_profile.values)},
+        outputs={b_ac: solph.Flow(nominal_capacity=1, maximum=last_profile.values)},
         conversion_factors={b_ac: 1.0},
     )
     # NEU: Netz->Ladebus (Batterie-Ladung AUS DEM NETZ) ist jetzt auf das
@@ -751,7 +799,7 @@ def build_energysystem(
     link_netz_charge = solph.components.Converter(
         label="netzbezug_zu_ladebus",
         inputs={b_netzbezug: solph.Flow()},
-        outputs={b_ladebus: solph.Flow(nominal_value=max_bezug_batterie)},
+        outputs={b_ladebus: solph.Flow(nominal_capacity=max_bezug_batterie)},
         conversion_factors={b_ladebus: 1.0},
     )
     # NEU (Root-Cause-Fix, Beats Rueckmeldung 11.9.2026: "wieso wird die
@@ -779,7 +827,7 @@ def build_energysystem(
     link_entlade_ac = solph.components.Converter(
         label="entladebus_zu_ac",
         inputs={b_entladebus: solph.Flow()},
-        outputs={b_ac: solph.Flow(nominal_value=params["leistung"])},
+        outputs={b_ac: solph.Flow(nominal_capacity=params["leistung"])},
         conversion_factors={b_ac: 1.0},
     )
     link_batt_export = solph.components.Converter(
@@ -787,7 +835,7 @@ def build_energysystem(
         inputs={b_entladebus: solph.Flow()},
         outputs={
             b_export: solph.Flow(
-                nominal_value=max_einspeisung_batterie,
+                nominal_capacity=max_einspeisung_batterie,
                 variable_costs=-zeitreihen["rueckliefertarif_batterie"].values,
             )
         },
@@ -800,23 +848,34 @@ def build_energysystem(
     eta_laden = params["lade_wirkungsgrad"] * params["trafo_wirkungsgrad"]
     eta_entladen = params["entlade_wirkungsgrad"] * params["trafo_wirkungsgrad"]
 
-    # custom_attributes fuer generic_integral_limit (Vollzyklen-Durchsatz) --
+    # custom_properties fuer generic_integral_limit (Vollzyklen-Durchsatz) --
     # Attributname je nach oemof-Version ggf. anzupassen (siehe Hinweis oben).
+    # NEU (Beat, 18.9.2026: "wie werde ich das FutureWarning los?"): heisst
+    # jetzt `custom_properties` statt `custom_attributes` (der alte Name
+    # loeste eine FutureWarning aus -- neuere oemof.solph-Versionen mappen
+    # ihn intern ohnehin auf denselben Speicherort, exakt wie bei
+    # nominal_capacity/nominal_value unten). generic_integral_limit() weiter
+    # unten liest ueber den Keyword-String "vollzyklen_keyword", nicht ueber
+    # den Attributnamen selbst -- davon also unberuehrt. Nicht direkt in
+    # dieser Sandbox verifizierbar (kein lauffaehiges oemof.solph hier, siehe
+    # Modulkopf) -- bitte beim naechsten echten Lauf pruefen, dass die
+    # Vollzyklen-Durchsatzbegrenzung weiterhin greift (z.B. am Solver-Log
+    # oder an `SOC_kWh` ueber ein extrem hohes C29 hinaus).
     # variable_costs: NEU, der kleine Degradationskosten-Term (siehe
     # DEGRADATIONSKOSTEN_CHF_PRO_KWH oben) -- oemof multipliziert
     # Flow(kW) * variable_costs(CHF/kWh) * Zeitschrittlaenge(h) automatisch
     # in die Zielfunktion, genau wie bei den Bezugs-/Ruecklieferkosten.
     # NEU (Root-Cause-Fix, siehe ausfuehrlicher Kommentar bei
-    # link_entlade_ac/link_batt_export oben): nominal_value ist jetzt WIEDER
-    # nur params["leistung"] (die allgemeine Batterieleistung C30) -- die
+    # link_entlade_ac/link_batt_export oben): nominal_capacity ist jetzt
+    # WIEDER nur params["leistung"] (die allgemeine Batterieleistung C30) -- die
     # "Maximale Einspeisung Batterie" (C45) sitzt jetzt AUSSCHLIESSLICH auf
     # dem Export-Abgang (entladebus_zu_export), nicht mehr hier auf dem
     # kombinierten Ausgang. Vorher war C45=0 gleichbedeutend mit "Batterie
     # komplett stillgelegt" (auch fuer Last-Deckung/Peak-Shaving/HT-NT-
     # Verschiebung) -- das entsprach nicht Beats Absicht (siehe Bugfix-Log).
     discharge_flow = solph.Flow(
-        nominal_value=params["leistung"],
-        custom_attributes={"vollzyklen_keyword": 1},
+        nominal_capacity=params["leistung"],
+        custom_properties={"vollzyklen_keyword": 1},
         variable_costs=DEGRADATIONSKOSTEN_CHF_PRO_KWH,
     )
 
@@ -828,7 +887,7 @@ def build_energysystem(
         # Bezeichnung bleibt vorerst nur aus Kompatibilitaetsgruenden
         # erhalten und wird intern ohnehin auf die neue umgemappt).
         nominal_capacity=params["kapazitaet"],
-        inputs={b_ladebus: solph.Flow(nominal_value=params["leistung"])},
+        inputs={b_ladebus: solph.Flow(nominal_capacity=params["leistung"])},
         outputs={b_entladebus: discharge_flow},
         inflow_conversion_factor=eta_laden,
         outflow_conversion_factor=eta_entladen,

@@ -67,6 +67,22 @@ import pandas as pd
 import requests
 from openpyxl import load_workbook
 
+# NEU (Beat, 18.9.2026: "wie werde ich das UserWarning los?"): openpyxl meldet
+# beim Einlesen JEDER .xlsx-Datei mit Dropdown-Validierungen (Data Validation,
+# z.B. Beats "Ja"/"Nein"-Felder in Parameter) diese harmlose Warnung -- die
+# Validierung selbst bleibt beim reinen Lesen unberuehrt, nur openpyxls
+# Faehigkeit, sie beim erneuten SPEICHERN (input_lp.xlsx) vollstaendig zu
+# erhalten, ist eingeschraenkt. Das ist unkritisch (input_lp.xlsx ist eine
+# reine Zwischen-Datei fuer battery_optimization.py, keine Datei, in die Beat
+# spaeter noch von Hand etwas per Dropdown eintragen wuerde). Bewusst NUR
+# diese eine, namentlich passende Meldung unterdrueckt (kein pauschales
+# `ignore` aller UserWarnings), damit andere, tatsaechlich relevante
+# Warnungen (z.B. Einheiten-Plausibilitaet, SwissIX-Fallback) weiterhin
+# sichtbar bleiben.
+warnings.filterwarnings(
+    "ignore", message=r".*Data Validation extension is not supported.*", category=UserWarning
+)
+
 # --------------------------------------------------------------------------
 # Konfiguration
 # --------------------------------------------------------------------------

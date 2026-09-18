@@ -13,7 +13,11 @@ genutzt werden.
 
 Spalten der Zeitreihen-Tabelle (siehe `build_output_table()`):
   - Index "Zeit" (15-Min-Zeitstempel)
-  - Energiepreis_Bezug_CHF_kWh / Energiepreis_Rueckliefer_CHF_kWh
+  - Energiepreis_Bezug_CHF_kWh / Energiepreis_Rueckliefer_PV_CHF_kWh /
+    Energiepreis_Rueckliefer_Batterie_CHF_kWh (NEU seit 17.9.2026: PV und
+    Batterie koennen unterschiedliche Ruecklieferschemas/-tarife haben,
+    siehe input_prep.py::resolve_rueckliefertarif() -- vorher gab es dafuer
+    nur eine gemeinsame Spalte, die faelschlich immer den PV-Tarif zeigte)
   - PV_Erzeugung_kW, Last_kW, Netzbezug_Total_kW (zur Kontrolle der
     Energiebilanz -- nicht explizit angefragt, aber praktisch fuer die
     Verifikation)
@@ -254,7 +258,22 @@ def build_output_table(
         {
             "Zeitzone": zeitzone_spalte,
             "Energiepreis_Bezug_CHF_kWh": zeitreihen["bezugstarif"].values,
-            "Energiepreis_Rueckliefer_CHF_kWh": zeitreihen["rueckliefertarif"].values,
+            # NEU (Beat, 17.9.2026, anhand Ergebnis_BAT_PV_ohneLaden.xlsx:
+            # "können wir im Outputfile die 'Rücklieferpreise' aller
+            # Technologien darstellen (also PV und BAT)? Im Beispiel hat PV
+            # RMP und BAT SPOT"): PV und Batterie koennen seit Beats
+            # Erweiterung (siehe input_prep.py::resolve_rueckliefertarif())
+            # UNTERSCHIEDLICHE Ruecklieferschemas/-tarife haben -- die bisherige
+            # einzelne Spalte "Energiepreis_Rueckliefer_CHF_kWh" zeigte NUR den
+            # PV-Tarif, der Batterie-Tarif war im Output gar nicht sichtbar.
+            # Jetzt zwei eigene Spalten, analog zu den anderen PV/Batterie-
+            # Aufteilungen (Ertrag_Eigenverbrauch_PV_CHF etc.) weiter unten.
+            "Energiepreis_Rueckliefer_PV_CHF_kWh": zeitreihen["rueckliefertarif"].values,
+            "Energiepreis_Rueckliefer_Batterie_CHF_kWh": (
+                zeitreihen["rueckliefertarif_batterie"].values
+                if "rueckliefertarif_batterie" in zeitreihen.columns
+                else zeitreihen["rueckliefertarif"].values
+            ),
             "PV_Erzeugung_kW": pv_profile.values,
             "Last_kW": last_profile.values,
             "Netzbezug_Total_kW": ts["netzbezug_total"].values,
@@ -765,7 +784,12 @@ def build_quarterly_avg_profile(ts: pd.DataFrame, pv_profile: pd.Series, last_pr
 # -- kein battery_optimization/oemof-Zugriff noetig.
 # --------------------------------------------------------------------------
 
-def build_baseline_energy_series(pv_profile: pd.Series, last_profile: pd.Series):
+def build_baseline_energy_series(
+    pv_profile: pd.Series,
+    last_profile: pd.Series,
+    rueckliefertarif_pv: np.ndarray | None = None,
+    abschaltung_erlaubt: bool = False,
+):
     """Referenzfall OHNE Batterie, pro Zeitschritt (kW): ohne Speicher gibt es
     nur DIREKTEN PV-Eigenverbrauch (keine Zwischenspeicherung fuer spaeteren
     Verbrauch):
@@ -773,37 +797,80 @@ def build_baseline_energy_series(pv_profile: pd.Series, last_profile: pd.Series)
       - Rueckspeisung_ohne(t)  = PV(t) - Eigenverbrauch_ohne(t)   (>= 0)
       - Netzbezug_ohne(t)      = Last(t) - Eigenverbrauch_ohne(t) (>= 0)
     Gibt die drei kW-Arrays zurueck (gleiche Laenge/Reihenfolge wie
-    pv_profile/last_profile)."""
+    pv_profile/last_profile).
+
+    NEU (Beat, 18.9.2026, im Anschluss an seine Nachfrage "wieso kommt jetzt
+    ohne Batterie eine hoehere durchschnittliche Netzeinspeisung heraus?":
+    "der Bericht soll das darstellen was im gewuenschten System exportiert
+    wird [...], also wenn 'ja' steht die Menge ohne Abriegelung [in beiden
+    Faellen -> dann sollte Batterie hoeher sein], bei nein auch beide Faelle
+    ohne Abriegelung"): bisher wurde hier IMMER die komplette Ueberschuss-
+    energie als exportiert angenommen, unabhaengig vom Rueckliefertarif --
+    das ist inkonsistent mit dem tatsaechlichen "mit Batterie"-Ergebnis, das
+    (bei `pv_abschaltung_erlaubt`="Ja") bei Negativpreisen abregelt statt zu
+    exportieren. Optionale Parameter `rueckliefertarif_pv`/`abschaltung_
+    erlaubt`: ist Abschaltung erlaubt UND der Tarif uebergeben, wird die
+    Ueberschussenergie bei negativem Preis genauso abgeriegelt (0 statt
+    Export) wie im echten "mit Batterie"-Solve -- macht den Vergleich
+    "was wird im konfigurierten System tatsaechlich exportiert" fair (siehe
+    compute_pv_abriegelung_wert_ohne_batterie(), die dieselbe Logik schon
+    fuer die separate Wert-Analyse verwendet). Ohne diese beiden Parameter
+    (Default) bleibt das bisherige Verhalten unveraendert -- rueckwaerts-
+    kompatibel fuer jeden Aufrufer, der sie nicht mitgibt."""
     pv = pv_profile.values
     last = last_profile.values
     eigenverbrauch_ohne = np.minimum(pv, last)
     rueckspeisung_ohne = pv - eigenverbrauch_ohne
+    if abschaltung_erlaubt and rueckliefertarif_pv is not None:
+        negativ = np.asarray(rueckliefertarif_pv) < 0
+        rueckspeisung_ohne = np.where(negativ, 0.0, rueckspeisung_ohne)
     netzbezug_ohne = last - eigenverbrauch_ohne
     return eigenverbrauch_ohne, rueckspeisung_ohne, netzbezug_ohne
 
 
 def build_baseline_monthly_energy_table(
-    pv_profile: pd.Series, last_profile: pd.Series, dt_hours: float = 0.25
+    pv_profile: pd.Series,
+    last_profile: pd.Series,
+    dt_hours: float = 0.25,
+    rueckliefertarif_pv: np.ndarray | None = None,
+    abschaltung_erlaubt: bool = False,
 ) -> pd.DataFrame:
     """Wie build_monthly_energy_table(), aber fuer den Referenzfall OHNE
     Batterie -- fuer das "Ohne Batterie"-Panel neben dem bestehenden
     Eigenverbrauch/Rueckspeisung-Chart. Ohne Batterie gibt es keinen
     Batterie-Export, daher ist "Rueckspeisung_Batterie_kWh" hier immer 0 --
     nur fuer dieselbe Spaltenform wie build_monthly_energy_table() (NEU seit
-    15.9.2026, siehe dort)."""
+    15.9.2026, siehe dort). `rueckliefertarif_pv`/`abschaltung_erlaubt`: siehe
+    build_baseline_energy_series() (NEU 18.9.2026, konsistente Abriegelung)."""
     idx = pv_profile.index
     monat = idx.month
     gueltige_monate = _valid_calendar_groups(monat)
-    _, rueckspeisung_ohne, netzbezug_ohne = build_baseline_energy_series(pv_profile, last_profile)
+    eigenverbrauch_ohne, rueckspeisung_ohne, netzbezug_ohne = build_baseline_energy_series(
+        pv_profile, last_profile, rueckliefertarif_pv, abschaltung_erlaubt
+    )
 
     pv_kwh = pd.Series(pv_profile.values * dt_hours, index=idx).groupby(monat).sum()
+    eigenverbrauch_kwh = pd.Series(eigenverbrauch_ohne * dt_hours, index=idx).groupby(monat).sum()
     rueckspeisung_kwh = pd.Series(rueckspeisung_ohne * dt_hours, index=idx).groupby(monat).sum()
     netzbezug_kwh = pd.Series(netzbezug_ohne * dt_hours, index=idx).groupby(monat).sum()
     # NEU: DST-Randfragment-Monate verwerfen, siehe _valid_calendar_groups().
     pv_kwh = pv_kwh[pv_kwh.index.isin(gueltige_monate)]
+    eigenverbrauch_kwh = eigenverbrauch_kwh[eigenverbrauch_kwh.index.isin(gueltige_monate)]
     rueckspeisung_kwh = rueckspeisung_kwh[rueckspeisung_kwh.index.isin(gueltige_monate)]
     netzbezug_kwh = netzbezug_kwh[netzbezug_kwh.index.isin(gueltige_monate)]
-    eigenverbrauch_kwh = pv_kwh - rueckspeisung_kwh
+    # BUGFIX (Beat, 18.9.2026, "wie kann ich einen EV haben ohne Last, nur mit
+    # PV?"): frueher wurde Eigenverbrauch hier als Residuum PV_kWh - Rueck-
+    # speisung_kWh berechnet. Das war unschaedlich, SOLANGE Rueckspeisung_ohne
+    # immer exakt "PV minus last-gedeckter Anteil" war -- seit dem Abriegelungs-
+    # Fix vom selben Tag (build_baseline_energy_series(), Abriegelung bei
+    # Negativpreisen) reduziert Abriegelung Rueckspeisung_ohne aber UNABHAENGIG
+    # von der Last. Das Residuum verwechselte dadurch abgeriegelte (weder
+    # verbrauchte noch exportierte) PV-Energie mit "Eigenverbrauch" -- bei
+    # einem System OHNE Last zeigte das faelschlich eine Eigenverbrauchsquote
+    # > 0% (z.B. 11% bei ~35 MWh/Jahr Abriegelung), obwohl an keiner Last
+    # ueberhaupt etwas ankam. Fix: Eigenverbrauch_kWh jetzt direkt aus dem
+    # bereits last-basiert korrekten eigenverbrauch_ohne (siehe
+    # build_baseline_energy_series()) aggregiert, nicht mehr als Residuum.
     with np.errstate(divide="ignore", invalid="ignore"):
         eigenverbrauchsquote_pct = np.where(
             pv_kwh.values > 1e-9, eigenverbrauch_kwh.values / pv_kwh.values * 100.0, 0.0
@@ -822,14 +889,24 @@ def build_baseline_monthly_energy_table(
     return tabelle
 
 
-def build_baseline_monthly_peak_table(pv_profile: pd.Series, last_profile: pd.Series) -> pd.Series:
+def build_baseline_monthly_peak_table(
+    pv_profile: pd.Series,
+    last_profile: pd.Series,
+    rueckliefertarif_pv: np.ndarray | None = None,
+    abschaltung_erlaubt: bool = False,
+) -> pd.Series:
     """Wie build_monthly_peak_table(), aber fuer den Referenzfall OHNE
     Batterie (dieselbe Groesse, auf der auch die Peak-Shaving-Ersparnis in
-    battery_optimization.main() basiert)."""
+    battery_optimization.main() basiert). Abregelung wirkt nur auf die
+    Ueberschuss-/Exportseite, Netzbezug_ohne ist davon unberuehrt -- die
+    Parameter werden hier trotzdem durchgereicht, damit alle vier Baseline-
+    Funktionen dieselbe Signatur/denselben Aufrufstil haben."""
     idx = pv_profile.index
     monat = idx.month
     gueltige_monate = _valid_calendar_groups(monat)
-    _, _, netzbezug_ohne = build_baseline_energy_series(pv_profile, last_profile)
+    _, _, netzbezug_ohne = build_baseline_energy_series(
+        pv_profile, last_profile, rueckliefertarif_pv, abschaltung_erlaubt
+    )
     peak = pd.Series(netzbezug_ohne, index=idx).groupby(monat).max()
     peak = peak[peak.index.isin(gueltige_monate)]  # DST-Randfragment verwerfen
     peak.index.name = "Monat"
@@ -838,15 +915,23 @@ def build_baseline_monthly_peak_table(pv_profile: pd.Series, last_profile: pd.Se
 
 
 def build_netzbezug_quarterly_profiles(
-    ts: pd.DataFrame, pv_profile: pd.Series, last_profile: pd.Series
+    ts: pd.DataFrame,
+    pv_profile: pd.Series,
+    last_profile: pd.Series,
+    rueckliefertarif_pv: np.ndarray | None = None,
+    abschaltung_erlaubt: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Durchschnittliches Tagesprofil des NETZBEZUGS (kW, >= 0) je Quartal --
     einmal fuer den Referenzfall OHNE Batterie (max(Last-PV, 0)) und einmal
     MIT Batterie (ts["netzbezug_total"], das tatsaechliche Optimierungs-
     ergebnis). Basis fuer den Ohne/Mit-Vergleichschart "Bezug Energie ab Netz
     -- Tagesprofil je Quartal" im PDF-Report (ersetzt den vorherigen reinen
-    Nettolast-Chart, siehe build_quarterly_avg_profile())."""
-    _, _, netzbezug_ohne = build_baseline_energy_series(pv_profile, last_profile)
+    Nettolast-Chart, siehe build_quarterly_avg_profile()). Netzbezug_ohne ist
+    von der Abriegelung unberuehrt (betrifft nur den Export) -- Parameter aus
+    Konsistenzgruenden trotzdem durchgereicht, siehe build_baseline_energy_series()."""
+    _, _, netzbezug_ohne = build_baseline_energy_series(
+        pv_profile, last_profile, rueckliefertarif_pv, abschaltung_erlaubt
+    )
     profil_ohne = _build_quarterly_avg_profile_generic(
         pv_profile.index, netzbezug_ohne, label="Netzbezug ohne Batterie"
     )
@@ -857,7 +942,11 @@ def build_netzbezug_quarterly_profiles(
 
 
 def build_einspeisung_quarterly_profiles(
-    ts: pd.DataFrame, pv_profile: pd.Series, last_profile: pd.Series
+    ts: pd.DataFrame,
+    pv_profile: pd.Series,
+    last_profile: pd.Series,
+    rueckliefertarif_pv: np.ndarray | None = None,
+    abschaltung_erlaubt: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Wie build_netzbezug_quarterly_profiles(), aber fuer die NETZEINSPEISUNG
     (Rueckspeisung/Export ins Netz, kW, >= 0) statt des Netzbezugs -- Beats
@@ -869,8 +958,17 @@ def build_einspeisung_quarterly_profiles(
     Referenzfall OHNE Batterie: direkter PV-Ueberschuss (PV - Eigenverbrauch,
     siehe build_baseline_energy_series()). MIT Batterie: ts["export"], der
     tatsaechliche Optimierungs-Export (kann auch groesser sein als der reine
-    PV-Ueberschuss, falls die Batterie zeitweise ins Netz entlaedt)."""
-    _, rueckspeisung_ohne, _ = build_baseline_energy_series(pv_profile, last_profile)
+    PV-Ueberschuss, falls die Batterie zeitweise ins Netz entlaedt).
+
+    NEU (Beat, 18.9.2026, siehe build_baseline_energy_series()): mit
+    `rueckliefertarif_pv`/`abschaltung_erlaubt` wird der Referenzfall OHNE
+    Batterie bei Negativpreisen genauso abgeriegelt wie das tatsaechliche
+    "mit Batterie"-Ergebnis -- macht diesen Chart konsistent mit dem
+    konfigurierten System (Parameter!C27) statt immer die volle, ungefilterte
+    PV-Ueberschussmenge zu zeigen."""
+    _, rueckspeisung_ohne, _ = build_baseline_energy_series(
+        pv_profile, last_profile, rueckliefertarif_pv, abschaltung_erlaubt
+    )
     profil_ohne = _build_quarterly_avg_profile_generic(
         pv_profile.index, rueckspeisung_ohne, label="Einspeisung ohne Batterie"
     )
@@ -878,6 +976,126 @@ def build_einspeisung_quarterly_profiles(
         ts.index, ts["export"].values, label="Einspeisung mit Batterie"
     )
     return profil_ohne, profil_mit
+
+
+def compute_pv_abriegelung_wert_ohne_batterie(
+    pv_profile: pd.Series, last_profile: pd.Series, zeitreihen: pd.DataFrame, dt_hours: float = 0.25,
+) -> dict:
+    """NEU (Beat, 17.9.2026: "wir haben ja die Option PV bei Negativpreisen
+    auszuschalten. Das hat einen Wert. Können wir das in die Auswertung mit
+    hineinnehmen?"): analytischer (rein rechnerischer, KEIN oemof-Solve
+    noetiger) "Wert der PV-Abschaltung bei Negativpreisen" fuer den
+    Referenzfall OHNE Batterie.
+
+    Warum das ohne Solve geht: ohne Batterie ist die Abschalt-Entscheidung
+    JEDEN Zeitschritt fuer sich genommen unabhaengig von allen anderen (keine
+    Speicher-Zwischenwirkung/SOC) -- bei negativem PV-Ruecklieferpreis lohnt
+    sich Abschalten IMMER (0 CHF statt eines Verlusts), bei positivem/
+    neutralem Preis NIE (jede zusaetzliche exportierte kWh bringt Ertrag).
+    Der direkte PV-Eigenverbrauch (Referenzfall build_baseline_energy_series())
+    ist von der Abschalt-Frage gar nicht betroffen, nur der PV-UEBERSCHUSS
+    (der sonst exportiert wuerde).
+
+    Gibt ein Dict mit den beiden Gesamtertraegen (mit/ohne Abschalt-Option,
+    jeweils Eigenverbrauch + effektive Rueckspeisung, CHF ueber den
+    simulierten Zeitraum -- NICHT auf ein Jahr hochgerechnet, konsistent mit
+    build_income_expense_summary()'s "Einnahmen"-Summen) sowie deren Differenz
+    ("wert_abriegelung_chf") und der dabei abgeriegelten Energiemenge zurueck.
+    Wird von run_battery_analysis.py auch als Referenzbasis fuer "Mehrwert der
+    Batterie mit/ohne Abriegelung" verwendet (Differenz zum jeweiligen
+    Solve-Ergebnis MIT Batterie unter derselben Abschalt-Einstellung)."""
+    eigenverbrauch_ohne, rueckspeisung_ohne, _ = build_baseline_energy_series(pv_profile, last_profile)
+    bezugstarif = zeitreihen["bezugstarif"].values
+    rueckliefertarif_pv = zeitreihen["rueckliefertarif"].values
+
+    # Eigenverbrauch ist von der Abschalt-Frage unberuehrt (betrifft nur den
+    # PV-UEBERSCHUSS) -- einmal berechnen, fuer beide Varianten gueltig.
+    ertrag_eigenverbrauch = float(np.sum(eigenverbrauch_ohne * bezugstarif) * dt_hours)
+
+    # Ohne Abschalt-Option: JEDE Ueberschussenergie wird exportiert, auch bei
+    # negativem Preis (= Kosten in diesem Zeitschritt).
+    ertrag_rueckspeisung_ohne_abriegelung = float(np.sum(rueckspeisung_ohne * rueckliefertarif_pv) * dt_hours)
+    total_ohne_abriegelung = ertrag_eigenverbrauch + ertrag_rueckspeisung_ohne_abriegelung
+
+    # Mit Abschalt-Option: bei negativem Preis wird abgeriegelt statt
+    # exportiert (0 CHF fuer diese kWh, statt eines Verlusts).
+    negativ = rueckliefertarif_pv < 0
+    rueckspeisung_effektiv = np.where(negativ, 0.0, rueckspeisung_ohne)
+    ertrag_rueckspeisung_mit_abriegelung = float(np.sum(rueckspeisung_effektiv * rueckliefertarif_pv) * dt_hours)
+    total_mit_abriegelung = ertrag_eigenverbrauch + ertrag_rueckspeisung_mit_abriegelung
+
+    abgeriegelte_energie_kwh = float(np.sum(rueckspeisung_ohne[negativ]) * dt_hours)
+
+    return {
+        "total_mit_abriegelung_chf": total_mit_abriegelung,
+        "total_ohne_abriegelung_chf": total_ohne_abriegelung,
+        "wert_abriegelung_chf": total_mit_abriegelung - total_ohne_abriegelung,
+        "abgeriegelte_energie_kwh": abgeriegelte_energie_kwh,
+    }
+
+
+def build_pv_abriegelung_analyse(
+    ertrag_operativ_konfiguriert: float,
+    ertrag_operativ_gegenteil: float | None,
+    abschaltung_aktuell_erlaubt: bool,
+    ohne_batterie: dict,
+    fehler: str | None = None,
+) -> dict:
+    """AKTUELL UNGENUTZT (Beat, 18.9.2026: "nur 1 Wert zeigen: Wert der
+    Abschaltung ohne Batterie") -- run_battery_analysis.py ruft diese
+    Funktion seither nicht mehr auf (und macht dafuer auch den zweiten,
+    vollstaendigen oemof-Solve nicht mehr), da die "mit Batterie"/"Mehrwert
+    der Batterie"-Zahlen, die sie berechnet, im PDF-Report nicht mehr
+    angezeigt werden. Bewusst NICHT geloescht (kleine, isoliert testbare
+    reine Funktion, falls diese Ansicht spaeter wieder gewuenscht wird).
+
+    Kombiniert die Ergebnisse der beiden 'mit Batterie'-Solves (die
+    KONFIGURIERTE Einstellung, plus ein zweiter Solve mit umgekehrter
+    `pv_abschaltung_erlaubt`-Einstellung als Gegenprobe) mit der rein
+    analytischen "ohne Batterie"-Rechnung (siehe
+    compute_pv_abriegelung_wert_ohne_batterie() oben) zur fertigen
+    `pv_abriegelung`-Datenstruktur fuer build_pdf_report() (siehe dortiger
+    Parameter-Docstring fuer die genaue Form).
+
+    Bewusst als REINE Zusammenfuehrungsfunktion (nimmt beide "Total
+    (operativ)"-Werte als fertige Zahlen entgegen, fuehrt selbst KEINEN
+    Solve durch) -- ausgelagert aus run_battery_analysis.py, damit diese
+    Logik auch ohne lauffaehige oemof/pyomo-Installation isoliert testbar
+    bleibt (siehe Testabdeckungs-Hinweis im Modulkopf).
+
+    `ertrag_operativ_gegenteil=None` (bzw. `fehler` gesetzt) bedeutet: der
+    zweite Solve ist fehlgeschlagen -- dann bleibt "mit Batterie"/"Mehrwert
+    der Batterie" leer (None), nur die analytische "ohne Batterie"-Zahl wird
+    trotzdem gezeigt."""
+    if ertrag_operativ_gegenteil is None or fehler:
+        return {
+            "pv_vorhanden": True,
+            "abschaltung_aktuell_erlaubt": abschaltung_aktuell_erlaubt,
+            "ohne_batterie": ohne_batterie,
+            "mit_batterie": None,
+            "mehrwert_batterie_mit_abriegelung_chf": None,
+            "mehrwert_batterie_ohne_abriegelung_chf": None,
+            "fehler": fehler,
+        }
+    # "mit Erlaubnis" / "ohne Erlaubnis" statt "konfiguriert"/"Gegenteil", da
+    # die aktuelle Excel-Konfiguration entweder die eine oder die andere sein
+    # kann -- die Differenz ("Wert der Abschaltung") ist unabhaengig davon
+    # immer "Ertrag MIT der Option minus Ertrag OHNE die Option".
+    ertrag_mit_erlaubnis = ertrag_operativ_konfiguriert if abschaltung_aktuell_erlaubt else ertrag_operativ_gegenteil
+    ertrag_ohne_erlaubnis = ertrag_operativ_gegenteil if abschaltung_aktuell_erlaubt else ertrag_operativ_konfiguriert
+    return {
+        "pv_vorhanden": True,
+        "abschaltung_aktuell_erlaubt": abschaltung_aktuell_erlaubt,
+        "ohne_batterie": ohne_batterie,
+        "mit_batterie": {
+            "total_mit_abriegelung_chf": ertrag_mit_erlaubnis,
+            "total_ohne_abriegelung_chf": ertrag_ohne_erlaubnis,
+            "wert_abriegelung_chf": ertrag_mit_erlaubnis - ertrag_ohne_erlaubnis,
+        },
+        "mehrwert_batterie_mit_abriegelung_chf": ertrag_mit_erlaubnis - ohne_batterie["total_mit_abriegelung_chf"],
+        "mehrwert_batterie_ohne_abriegelung_chf": ertrag_ohne_erlaubnis - ohne_batterie["total_ohne_abriegelung_chf"],
+        "fehler": None,
+    }
 
 
 def build_monthly_charge_discharge_table(ts: pd.DataFrame, dt_hours: float = 0.25) -> pd.DataFrame:
@@ -1229,8 +1447,11 @@ def _prose_box(ax, fig_w, fig_h, x_in, top_in, width_in, text, fontsize=9.8,
 # Fliesstext-Absatzes wie zuvor).
 _MODUL_GLOSSAR = [
     ("Eigenverbrauchsoptimierung", "Batterie deckt Last statt Netzbezug."),
-    ("Einspeiseoptimierung", "PV-Energie wird zeitversetzt eingespeist (bei tiefem "
-                             "Rückliefertarif geladen, bei höherem exportiert)."),
+    # NEU (Beat, 18.9.2026: "schaffst du die Einspeiseoptimierung-Beschreibung
+    # zu kuerzen, sodass sie auf eine Zeile passt?"): urspruengliche, laengere
+    # Formulierung wickelte sich in der PDF auf zwei Zeilen -- gleiche Aussage
+    # (tief laden, hoch einspeisen), kompakter formuliert.
+    ("Einspeiseoptimierung", "PV wird bei tiefem Rückliefertarif geladen, bei höherem eingespeist."),
     ("Arbitrage", "Netzenergie wird günstig geladen und teurer exportiert."),
     ("SRL", "separat vermarktete Sekundärregelleistung."),
     ("Peak-Shaving", "reduziert die monatliche Bezugsspitze."),
@@ -1482,6 +1703,23 @@ def _ist_wert_null(value) -> bool:
     return v == 0.0 or np.isnan(v)
 
 
+def _pv_abschaltung_erlaubt(params: dict) -> bool:
+    """NEU (Beat, 18.9.2026: "der Bericht soll das darstellen was im
+    gewünschten System exportiert wird [...], also wenn 'ja' steht die Menge
+    ohne Abriegelung [in beiden Faellen -> dann sollte Batterie hoeher sein],
+    bei nein auch beide Faelle ohne Abriegelung"): EINHEITLICHE Normalisierung
+    von Parameter!C27 ("Abschaltung bei Negativpreisen"), damit alle Stellen
+    im Report (Seite 0/1-Anzeige UND jetzt auch die "Ohne Batterie"-
+    Referenzrechnung in build_baseline_energy_series()) exakt dieselbe Regel
+    verwenden: leer/None/"ja" (Gross-/Kleinschreibung egal) -> True (erlaubt,
+    Default seit jeher), "nein" -> False. Spiegelt bewusst
+    battery_optimization.determine_pv_abschaltung_erlaubt() OHNE diese Datei
+    zu importieren (schlanke Abhaengigkeiten, siehe Modulkopf)."""
+    raw = params.get("pv_abschaltung_erlaubt")
+    normalisiert = str(raw).strip().lower() if raw is not None else ""
+    return normalisiert != "nein"
+
+
 SRL_MODUS_LABELS = {
     "ja_residual": "Post-hoc (Residual, SOC-gebandet)",
     "ja_optimiert": "Teil der Optimierung",
@@ -1497,6 +1735,29 @@ _SRL_KURZ_LABELS = {
     "ja_optimiert": "Optimiert",
     "nein": "inaktiv",
 }
+
+# NEU (Beat, 18.9.2026: "die Preisschemen dann bitte so ... aber auf Seite 0
+# bitte das Original lassen"): kundenfreundlichere Bezeichnung der
+# Preisschema-Codes NUR fuer die Seite-1-Kurzzusammenfassung -- Seite 0
+# (Eingabeparameter, `Preisschema`-Zeile in build_input_summary_rows()) zeigt
+# weiterhin den unveraenderten Excel-Rohwert (z.B. "Backcast_2025_Markt").
+# Kunde/Markt-Varianten desselben Jahres teilen bewusst dieselbe Kurzform --
+# der Unterschied Kunde/Markt ist fuer die knappe Zusammenfassung nicht
+# relevant, steht aber unveraendert im Detail auf Seite 0.
+_SRL_PREISSCHEMA_KURZ_LABELS = {
+    "forecast_2027_kunde": "Vorhersage 2027",
+    "forecast_2027_markt": "Vorhersage 2027",
+    "backcast_2025_kunde": "Marktpreise 2025",
+    "backcast_2025_markt": "Marktpreise 2025",
+}
+
+
+def _srl_preisschema_kurz(value) -> str:
+    """Uebersetzt einen SRL-Preisschema-Code (Parameter!C50) in die
+    kundenfreundliche Kurzform fuer Seite 1 -- unbekannte/leere Werte fallen
+    unveraendert auf `_fmt_param()` zurueck."""
+    norm = str(value).strip().lower() if value is not None else ""
+    return _SRL_PREISSCHEMA_KURZ_LABELS.get(norm, _fmt_param(value, na="unbekannt"))
 
 
 def _ruecklieferung_kurz(params: dict, schema_key: str, fixtarif_key: str, floor_key: str | None = None) -> str:
@@ -1551,39 +1812,53 @@ def build_input_summary_rows(
         {"label": "Simulierter Zeitraum", "value": zeitraum},
     ]
 
+    # NEU (Beat, 17.9.2026, anhand Bericht_BAT_PV_ohneLaden.pdf): "können wir
+    # das Tarifschema (Bezug) nur dann anzeigen, wenn wir auch eine Netzlast
+    # haben oder Batteriebezug aus Netz zugelassen ist?" -- Hintergrund:
+    # ohne Lastgang UND ohne dass die Batterie aus dem Netz laden darf
+    # (max_bezug_batterie = 0) gibt es im Modell gar keinen Weg, ueberhaupt
+    # Energie aus dem Netz zu BEZIEHEN (netzbezug_total ist dann immer 0) --
+    # das gewaehlte Bezugstarifschema ist dann fachlich bedeutungslos, analog
+    # zum Fixtarif-bei-Spot-Fix vom 15.9.2026 weiter unten.
+    last_vorhanden_raw = params.get("last_vorhanden")
+    last_vorhanden = str(last_vorhanden_raw).strip().lower() == "ja" if last_vorhanden_raw is not None else False
+    batteriebezug_erlaubt = not _ist_wert_null(params.get("max_bezug_batterie"))
+    bezug_tarif_relevant = last_vorhanden or batteriebezug_erlaubt
+
     tarifschema = params.get("tarifschema")
-    rows += [
-        {"label": "Tarifschema (Bezug)", "style": "header"},
-        {"label": "Schema", "value": _fmt_param(tarifschema, na="unbekannt")},
-    ]
-    schema_normalisiert = str(tarifschema).strip().upper() if tarifschema is not None else ""
-    if schema_normalisiert == "SPOT":
-        # NEU (Beat, 15.9.2026: "Energie-Markup Zeile auf Seite 1 brauche ich
-        # nicht" -- betrifft alle Zeilen, die mit "Energie-Markup:" beginnen,
-        # siehe auch _ruecklieferung_pv_zeilen()/_ruecklieferung_batterie_
-        # zeilen() unten): die Zeile "Energie-Markup: Aufschlag Bezug" wurde
-        # hier entfernt.
-        #
-        # NEU (Beats Hinweis zu Inputs_BAT_standalone.xlsx): zeigt, ob die
-        # SwissIX-Preise automatisch von der ENTSO-E-API kamen oder von Hand
-        # in Zeitreihen!B eingetragen wurden (siehe input_prep.py) -- nur
-        # sichtbar, falls dieser Hinweis beim Erstellen von input_lp.xlsx
-        # gesetzt wurde.
-        if params.get("swissix_quelle"):
-            rows.append({"label": "SwissIX-Preisquelle", "value": str(params["swissix_quelle"])})
-    elif schema_normalisiert == "HT_NT":
-        # NEU (Beats Rueckmeldung): HT und NT sauber getrennt (eigene Zeilen
-        # statt einer zusammengequetschten "HT-Preis / NT-Preis"-Zeile), je
-        # Periode benannt (Q1=../Winter=..) statt als rohem Komma-String, plus
-        # Zeitfenster und Wochentage als eigene Zeilen.
+    if bezug_tarif_relevant:
         rows += [
-            {"label": "HT-Preis", "value": _fmt_saisonal_werte(params.get("ht_preis"), "CHF/kWh", 3)},
-            {"label": "NT-Preis", "value": _fmt_saisonal_werte(params.get("nt_preis"), "CHF/kWh", 3)},
-            {"label": "HT-Zeitfenster", "value": _fmt_ht_zeitfenster(params.get("start_ht"), params.get("end_ht"))},
-            {"label": "HT-Tage", "value": _fmt_ht_tage(params.get("tage_ht"))},
+            {"label": "Tarifschema (Bezug)", "style": "header"},
+            {"label": "Schema", "value": _fmt_param(tarifschema, na="unbekannt")},
         ]
-    else:
-        rows.append({"label": "Hinweis", "value": "historischer Bezugstarif (Zeitreihen)"})
+        schema_normalisiert = str(tarifschema).strip().upper() if tarifschema is not None else ""
+        if schema_normalisiert == "SPOT":
+            # NEU (Beat, 15.9.2026: "Energie-Markup Zeile auf Seite 1 brauche ich
+            # nicht" -- betrifft alle Zeilen, die mit "Energie-Markup:" beginnen,
+            # siehe auch _ruecklieferung_pv_zeilen()/_ruecklieferung_batterie_
+            # zeilen() unten): die Zeile "Energie-Markup: Aufschlag Bezug" wurde
+            # hier entfernt.
+            #
+            # NEU (Beats Hinweis zu Inputs_BAT_standalone.xlsx): zeigt, ob die
+            # SwissIX-Preise automatisch von der ENTSO-E-API kamen oder von Hand
+            # in Zeitreihen!B eingetragen wurden (siehe input_prep.py) -- nur
+            # sichtbar, falls dieser Hinweis beim Erstellen von input_lp.xlsx
+            # gesetzt wurde.
+            if params.get("swissix_quelle"):
+                rows.append({"label": "SwissIX-Preisquelle", "value": str(params["swissix_quelle"])})
+        elif schema_normalisiert == "HT_NT":
+            # NEU (Beats Rueckmeldung): HT und NT sauber getrennt (eigene Zeilen
+            # statt einer zusammengequetschten "HT-Preis / NT-Preis"-Zeile), je
+            # Periode benannt (Q1=../Winter=..) statt als rohem Komma-String, plus
+            # Zeitfenster und Wochentage als eigene Zeilen.
+            rows += [
+                {"label": "HT-Preis", "value": _fmt_saisonal_werte(params.get("ht_preis"), "CHF/kWh", 3)},
+                {"label": "NT-Preis", "value": _fmt_saisonal_werte(params.get("nt_preis"), "CHF/kWh", 3)},
+                {"label": "HT-Zeitfenster", "value": _fmt_ht_zeitfenster(params.get("start_ht"), params.get("end_ht"))},
+                {"label": "HT-Tage", "value": _fmt_ht_tage(params.get("tage_ht"))},
+            ]
+        else:
+            rows.append({"label": "Hinweis", "value": "historischer Bezugstarif (Zeitreihen)"})
 
     # NEU (Beats Erweiterung: PV und Batterie koennen unterschiedlich
     # vermarktet werden -- unabhaengig vom obigen Bezugsschema, siehe
@@ -1661,9 +1936,7 @@ def build_input_summary_rows(
     # "Ja" (siehe battery_optimization.py::determine_pv_abschaltung_erlaubt) --
     # das wird hier ebenso dargestellt.
     if not _ist_wert_null(params.get("dc_leistung")):
-        abschaltung_raw = params.get("pv_abschaltung_erlaubt")
-        abschaltung_normalisiert = str(abschaltung_raw).strip().lower() if abschaltung_raw is not None else ""
-        abschaltung_anzeige = "Nein" if abschaltung_normalisiert == "nein" else "Ja"
+        abschaltung_anzeige = "Ja" if _pv_abschaltung_erlaubt(params) else "Nein"
         rows.append({"label": "Abschaltung bei Negativpreisen", "value": abschaltung_anzeige})
 
     eta_laden = None
@@ -1823,6 +2096,7 @@ def build_pdf_report(
     last_profile: pd.Series,
     kapitalkosten: dict,
     dt_hours: float = 0.25,
+    pv_abriegelung: dict | None = None,
 ) -> dict:
     """Baut den PDF-Report im Fleco-Letterhead-Stil (auf Beats Wunsch an sein
     eigenes Fleco-Referenzdokument angenaehert, siehe Farbschema-Kommentar
@@ -1840,7 +2114,9 @@ def build_pdf_report(
         Einnahmen (nur aktivierte Module), Jahres-Ausgaben (Amortisation/
         Kapitalkosten/Unterhalt), Gewinn/Verlust, sowie darunter die drei
         Rendite-Kennzahlen (LCOS, Amortisationsdauer, Kapitalverzinsung) als
-        Kennzahlen-Kacheln in einer Reihe.
+        Kennzahlen-Kacheln in einer Reihe, gefolgt von der NEUEN (17.9.2026)
+        Wert-Analyse der PV-Abschaltung bei Negativpreisen (siehe
+        `pv_abriegelung`-Parameter unten).
       Seite 3 -- Alle drei Chart-Themen (Eigenverbrauch/Rueckspeisung pro
         Monat, Netzbezug-Tagesprofil je Quartal, monatliche Lastspitze) in
         einem 3x2-Raster: je Thema ZWEI Mini-Charts nebeneinander ("Ohne
@@ -1856,6 +2132,28 @@ def build_pdf_report(
     battery_optimization.capital_costs(params) -- wird hier NICHT selbst
     berechnet, damit output_create.py kein battery_optimization braucht
     (schlanke Abhaengigkeiten, wie bei build_income_expense_summary()).
+
+    `pv_abriegelung` (NEU, Beat 17.9.2026: "wir haben ja die Option PV bei
+    Negativpreisen auszuschalten. Das hat einen Wert. Können wir das in die
+    Auswertung mit hineinnehmen?"; VEREINFACHT 18.9.2026: "ich hätte gerne
+    dass nur 1 Wert gezeigt wird: Wert der Abschaltung ohne Batterie"):
+    optionales Dict mit der Wert-Analyse fuer Seite 2, vom AUFRUFER
+    (run_battery_analysis.py) vorberechnet. Die gezeigte Zahl ist rein
+    analytisch (siehe compute_pv_abriegelung_wert_ohne_batterie() oben, KEIN
+    zusaetzlicher oemof-Solve noetig) -- eine fruehere Version zeigte
+    zusaetzlich eine "mit Batterie"/"Mehrwert der Batterie"-Zahl aus einem
+    zweiten, vollstaendigen Solve mit umgekehrter `pv_abschaltung_erlaubt`-
+    Einstellung; das wurde auf Beats Wunsch wieder entfernt (dieser zweite
+    Solve entfaellt dadurch auch in run_battery_analysis.py). Erwartete
+    Struktur (fehlt der Parameter oder ist `pv_vorhanden` False, wird die
+    ganze Sektion uebersprungen):
+      {
+        "pv_vorhanden": bool,
+        "ohne_batterie": {"wert_abriegelung_chf": float, "abgeriegelte_energie_kwh": float, ...},
+      }
+    Diese Analyse ist bewusst UNABHAENGIG von der Wirtschaftlichkeitsrechnung
+    oben (die immer mit der angegebenen Konfiguration rechnet, siehe Beats
+    Wunsch) -- eine reine Zusatzinformation "was waere der Unterschied".
 
     Gibt ein Dict mit allen zugrunde liegenden Tabellen zurueck (praktisch
     zum Cross-Check/Testen, ohne die PDF-Datei erneut oeffnen zu muessen).
@@ -1932,13 +2230,33 @@ def build_pdf_report(
             ts.index, ts["export"].values, label="Einspeisung mit Batterie"
         )
     else:
+        # NEU (Beat, 18.9.2026: "der Bericht soll das darstellen was im
+        # gewuenschten System exportiert wird [...], also wenn 'ja' steht die
+        # Menge ohne Abriegelung [in beiden Faellen -> dann sollte Batterie
+        # hoeher sein], bei nein auch beide Faelle ohne Abriegelung"): die
+        # "Ohne Batterie"-Referenz wendet jetzt dieselbe Abschalt-Logik an
+        # wie das tatsaechliche "mit Batterie"-Ergebnis (gesteuert ueber
+        # Parameter!C27) -- vorher exportierte die Referenz IMMER die volle
+        # Ueberschussenergie, auch bei Negativpreisen, was bei aktivierter
+        # Abschaltung zu einer irrefuehrend HOEHEREN "ohne Batterie"-Zahl
+        # fuehrte als bei "mit Batterie" (siehe compute_pv_abriegelung_wert_
+        # ohne_batterie(), die diese Logik fuer die separate Wert-Analyse
+        # schon vorher richtig gemacht hat).
+        rueckliefertarif_pv_arr = zeitreihen["rueckliefertarif"].values
+        abschaltung_erlaubt = _pv_abschaltung_erlaubt(params)
         monatstabelle = build_monthly_energy_table(ts, pv_profile, dt_hours)
-        monatstabelle_ohne = build_baseline_monthly_energy_table(pv_profile, last_profile, dt_hours)
-        profil_ohne, profil_mit = build_netzbezug_quarterly_profiles(ts, pv_profile, last_profile)
-        profil_einspeisung_ohne, profil_einspeisung_mit = build_einspeisung_quarterly_profiles(
-            ts, pv_profile, last_profile
+        monatstabelle_ohne = build_baseline_monthly_energy_table(
+            pv_profile, last_profile, dt_hours, rueckliefertarif_pv_arr, abschaltung_erlaubt
         )
-        peak_tabelle_ohne = build_baseline_monthly_peak_table(pv_profile, last_profile)
+        profil_ohne, profil_mit = build_netzbezug_quarterly_profiles(
+            ts, pv_profile, last_profile, rueckliefertarif_pv_arr, abschaltung_erlaubt
+        )
+        profil_einspeisung_ohne, profil_einspeisung_mit = build_einspeisung_quarterly_profiles(
+            ts, pv_profile, last_profile, rueckliefertarif_pv_arr, abschaltung_erlaubt
+        )
+        peak_tabelle_ohne = build_baseline_monthly_peak_table(
+            pv_profile, last_profile, rueckliefertarif_pv_arr, abschaltung_erlaubt
+        )
 
     netznutzung = params.get("netznutzung_leistung")
     peakshaving_hat_tarif = (
@@ -2228,13 +2546,15 @@ def build_pdf_report(
         komponenten.append("einem Lastgang" if last_vorhanden_zsf else None)
         komponenten_txt = ", ".join(k for k in komponenten if k)
 
+        # NEU (Beat, 18.9.2026: "auf Seite 1 bitte diesen Satz weglassen: ...die
+        # zugrundeliegenden Annahmen sind im Detail auf Seite 0 (Eingabeparameter)
+        # dokumentiert."): Schlussteil des Satzes entfernt, Rest unveraendert.
         zusammenfassung_text = (
             f"Dieser Bericht vergleicht den Betrieb mit und ohne Batteriespeicher über den "
             f"Zeitraum {zeitraum_txt} ({wirtschaftlichkeit_titel.split('—')[-1].strip()}). "
             f"Das analysierte System besteht aus {komponenten_txt}. Untersucht werden die "
             f"Effekte auf Eigenverbrauch, Netzbezug, Lastspitzen sowie die wirtschaftliche "
-            f"Rendite der Investition; die zugrundeliegenden Annahmen sind im Detail auf "
-            f"Seite 0 (Eingabeparameter) dokumentiert."
+            f"Rendite der Investition."
         )
         content1_top_in = _prose_box(
             ax1, fig1_w, fig1_h, margin1_in, content1_top_in, box1_width_in, zusammenfassung_text,
@@ -2254,21 +2574,37 @@ def build_pdf_report(
         # Preisschema angeben"): kurzes Label statt des ausfuehrlichen
         # SRL_MODUS_LABELS-Texts (der bleibt auf Seite 0), Preisschema in
         # derselben Zeile angehaengt, falls SRL ueberhaupt vermarktet wird.
+        # VEREINFACHT (Beat, 18.9.2026: "den Modus brauche ich da nicht"): der
+        # Modus (Residual/Optimiert) selbst wird auf Seite 1 nicht mehr
+        # angezeigt -- nur noch das Preisschema, solange SRL aktiv ist. Bei
+        # inaktivem SRL bleibt "inaktiv" als Statuszeile (kein Modus, aber
+        # ohne diese Info waere die Zeile leer).
         srl_teilnahme_zsf = params.get("srl_teilnahme")
         srl_normalisiert_zsf = str(srl_teilnahme_zsf).strip().lower() if srl_teilnahme_zsf is not None else ""
-        srl_kurz_zsf = _SRL_KURZ_LABELS.get(srl_normalisiert_zsf, _fmt_param(srl_teilnahme_zsf, na="unbekannt"))
+        # NEU (Beat, 18.9.2026: "die Preisschemen dann bitte so ..."):
+        # kundenfreundliche Kurzform statt des rohen Excel-Codes, siehe
+        # _srl_preisschema_kurz()/_SRL_PREISSCHEMA_KURZ_LABELS oben.
         if srl_normalisiert_zsf in ("ja_residual", "ja_optimiert"):
-            srl_wert_zsf = f"{srl_kurz_zsf} — Preisschema: {_fmt_param(params.get('srl_preisschema'), na='unbekannt')}"
+            srl_wert_zsf = _srl_preisschema_kurz(params.get("srl_preisschema"))
         else:
-            srl_wert_zsf = srl_kurz_zsf
+            srl_wert_zsf = _SRL_KURZ_LABELS.get(srl_normalisiert_zsf, _fmt_param(srl_teilnahme_zsf, na="unbekannt"))
+
+        # NEU (Beat, 17.9.2026, siehe gleichnamiger Fix in
+        # build_input_summary_rows()/Seite 0): Tarifschema (Bezug) -- und
+        # damit auch die HT/NT-Tarifzeilen -- nur zeigen, wenn ueberhaupt ein
+        # Netzbezug moeglich ist (Last vorhanden ODER Batterie darf aus dem
+        # Netz laden).
+        batteriebezug_erlaubt_zsf = not _ist_wert_null(params.get("max_bezug_batterie"))
+        bezug_tarif_relevant_zsf = last_vorhanden_zsf or batteriebezug_erlaubt_zsf
 
         # NEU (Beats Rueckmeldung "bei HT/NT bitte noch die Tarife angeben"):
         # HT/NT-Tarifzeilen nur, wenn das Bezugstarifschema tatsaechlich
-        # HT_NT ist (analog zur Weiche in build_input_summary_rows()/Seite 0).
+        # HT_NT ist (analog zur Weiche in build_input_summary_rows()/Seite 0)
+        # UND das Tarifschema ueberhaupt relevant ist (s.o.).
         tarifschema_zsf = params.get("tarifschema")
         tarifschema_norm_zsf = str(tarifschema_zsf).strip().upper() if tarifschema_zsf is not None else ""
         ht_nt_rows_zsf = []
-        if tarifschema_norm_zsf == "HT_NT":
+        if bezug_tarif_relevant_zsf and tarifschema_norm_zsf == "HT_NT":
             ht_nt_rows_zsf = [
                 {"label": "HT-Preis", "value": _fmt_saisonal_werte(params.get("ht_preis"), "CHF/kWh", 3)},
                 {"label": "NT-Preis", "value": _fmt_saisonal_werte(params.get("nt_preis"), "CHF/kWh", 3)},
@@ -2289,6 +2625,18 @@ def build_pdf_report(
             {"label": "PV-Anlage", "value": (
                 _fmt_param(params.get("dc_leistung"), "kWp", 1) if pv_vorhanden_zsf else "keine"
             )},
+            # NEU (Beat, 18.9.2026: "auf Seite 1 bitte noch angeben, ob
+            # Abschalten bei Negativpreisen zugelassen ist oder nicht bei der
+            # PV-Anlage"): nur relevant/gezeigt, wenn ueberhaupt eine PV-
+            # Anlage vorhanden ist. Gleiche Normalisierung wie auf Seite 0
+            # (build_input_summary_rows(), s.u.) bzw. im Solve selbst
+            # (battery_optimization.determine_pv_abschaltung_erlaubt()) -- hier
+            # bewusst OHNE Import von battery_optimization dupliziert, damit
+            # output_create.py weiterhin ohne oemof/pyomo-Abhaengigkeit
+            # (isoliert testbar) bleibt.
+            {"label": "Abschaltung bei Negativpreisen", "value": (
+                "Ja" if _pv_abschaltung_erlaubt(params) else "Nein"
+            )} if pv_vorhanden_zsf else None,
             {"label": "Batteriespeicher", "value": (
                 f"{_fmt_param(params.get('leistung'), 'kW')} / {_fmt_param(params.get('kapazitaet'), 'kWh')}"
             )},
@@ -2298,7 +2646,8 @@ def build_pdf_report(
             )},
             {"label": "Last (Jahreslast)", "value": last_wert_zsf},
             {"label": "Tarif & Netz", "style": "header"},
-            {"label": "Tarifschema (Bezug)", "value": _fmt_param(params.get("tarifschema"), na="unbekannt")},
+            {"label": "Tarifschema (Bezug)", "value": _fmt_param(params.get("tarifschema"), na="unbekannt")}
+            if bezug_tarif_relevant_zsf else None,
             *ht_nt_rows_zsf,
             {"label": "Netzanschluss (Bezug / Einspeisung)", "value": (
                 f"{_fmt_param(params.get('max_bezug'), 'kW')} / {_fmt_param(params.get('max_einspeisung'), 'kW')}"
@@ -2310,7 +2659,9 @@ def build_pdf_report(
                 f"aktiv ({_fmt_param(params.get('netznutzung_leistung'), 'CHF/kW/Monat', 2)})"
                 if peakshaving_hat_tarif else "inaktiv"
             )},
-            {"label": "Sekundärregelleistung (SRL)", "value": srl_wert_zsf},
+            # NEU (Beat, 18.9.2026: "bei SRL Seite 1 bitte so benennen: Preise
+            # Sekundärregelleistung (SRL)"):
+            {"label": "Preise Sekundärregelleistung (SRL)", "value": srl_wert_zsf},
         ]
         zsf_rows = [r for r in zsf_rows if r is not None]
         _draw_bordered_table(ax1, fig1_w, fig1_h, margin1_in, content1_top_in, box1_width_in, zsf_rows)
@@ -2338,15 +2689,30 @@ def build_pdf_report(
         rows.append({"label": "Gewinn / Verlust (netto)", "value": _fmt_chf(gewinn), "style": "result",
                      "color": _POS if gewinn >= 0 else _NEG})
 
+        import textwrap
+        line_h_in = 7.6 * 1.5 / 72.0  # Zeilenhoehe bei fontsize=7.6, linespacing=1.5
+
         _wirtschaftlichkeit_titel_size = 13 if dauer_ist_vollejahr else 11
         _section_label(ax, fig_w, fig_h, margin_in, content_top_in, wirtschaftlichkeit_titel,
                         size=_wirtschaftlichkeit_titel_size)
-        table_top_in = content_top_in - 0.34
-        top_in = _draw_bordered_table(ax, fig_w, fig_h, margin_in, table_top_in, table_width_in, rows)
+        table_top_in = content_top_in - 0.32
+        # NEU (Beat, 17.9.2026: "Wirtschaftlichkeit ... bitte kompakter"):
+        # kleinere Zeilenhoehe als frueher (0.27in statt 0.32in) -- schafft
+        # Platz fuer die neue PV-Abriegelung-Sektion unten, ohne dass die
+        # Tabelle selbst schwerer lesbar wird.
+        top_in = _draw_bordered_table(ax, fig_w, fig_h, margin_in, table_top_in, table_width_in, rows,
+                                       row_h_in=0.27)
 
-        top_in -= 0.5
+        # NEU (Beat, 17.9.2026: "die Erklärungen als Text direkt unter die
+        # Tabelle, oberhalb des Renditekapitels"): Modul-Glossar UND
+        # Methodik-Hinweis standen bisher NACH den Rendite-Kacheln -- beide
+        # jetzt direkt hier, vor Beginn der Renditebetrachtung.
+        top_in -= 0.16
+        top_in = _modul_glossar_box(fig, ax, fig_w, fig_h, margin_in, top_in, table_width_in, _MODUL_GLOSSAR)
+        top_in -= 0.07
+
         _section_label(ax, fig_w, fig_h, margin_in, top_in, "Renditebetrachtung")
-        top_in -= 0.34
+        top_in -= 0.32
 
         kennzahlen = [
             ("Levelized Cost of Storage", _fmt_kennzahl(rendite["lcos_rp_kwh"], "Rp/kWh")),
@@ -2355,44 +2721,26 @@ def build_pdf_report(
         ]
         tile_gap_in = 0.22
         tile_w_in = (table_width_in - 2 * tile_gap_in) / 3
-        tile_h_in = 1.5
+        # NEU (Beat, 17.9.2026: "Renditebetrachtung ein wenig besser
+        # darstellen"): etwas kompakter als zuvor (1.28in statt 1.5in), was
+        # zusammen mit der kompakteren Tabelle oben den Platz fuer die neue
+        # PV-Abriegelung-Sektion schafft, ohne die Kacheln selbst zu
+        # ueberladen -- Inhalt/Anordnung der Kacheln (_kpi_tile()) bleibt
+        # unveraendert.
+        tile_h_in = 1.28
         x_in = margin_in
         for label, val in kennzahlen:
             _kpi_tile(ax, fig_w, fig_h, x_in, top_in, tile_w_in, tile_h_in, label, val)
             x_in += tile_w_in + tile_gap_in
+        top_in -= tile_h_in + 0.14
 
-        # NEU (Beats Frage "wie kann die Amortisationsdauer 14 Jahre sein und
-        # die jaehrliche Wirtschaftsrechnung gleichzeitig negativ?"): die drei
-        # Kennzahlen oben rechnen bewusst OHNE Amortisation/Kapitalkosten
-        # (sonst waere "wie lange dauert die Amortisation" zirkulaer, siehe
-        # build_rendite_kennzahlen()) -- sie zeigen also eine ANDERE
-        # Finanzierungsannahme (kreditfreie Investition) als die Tabelle oben
-        # ("Gewinn/Verlust netto", die ein Annuitaetendarlehen unterstellt).
-        # Beide Zahlen koennen sich deshalb scheinbar widersprechen, ohne dass
-        # ein Rechenfehler vorliegt -- das wird hier IMMER (nicht nur bei
-        # Teil-Jahr-Szenarien) explizit erklaert, damit das nicht jedes Mal
-        # zu Rueckfragen fuehrt.
-        import textwrap
-        top_in -= tile_h_in + 0.22
-        line_h_in = 7.6 * 1.5 / 72.0  # Zeilenhoehe bei fontsize=7.6, linespacing=1.5
-
-        # NEU (Beats Wunsch: "kannst du diese Erklaerung mit in den PDF-Report
-        # nehmen -- anstelle des Hinweistextes, oder diesen kuerzen falls er
-        # noch Platz hat"): Beat hatte im Chat nach der Bedeutung von
-        # "Einspeiseoptimierung" gefragt -- die Zeilen der Einnahmen-Tabelle
-        # weiter oben (Eigenverbrauchsoptimierung/Einspeiseoptimierung/
-        # Arbitrage/SRL/Peak-Shaving) sind ohne Erklaerung nicht selbsterklaerend.
-        # Statt des bisherigen, sehr ausfuehrlichen Methodik-Hinweistexts steht
-        # hier jetzt zuerst dieses kompakte Modul-Glossar; der Methodik-Hinweis
-        # (Amortisationsdauer vs. Jahresergebnis) bleibt bestehen, aber stark
-        # gekuerzt, da fuer beides zusammen sonst kein Platz mehr auf der Seite
-        # waere.
-        # NEU (Beats Rueckmeldung "Module in der Einnahmen-Tabelle oben:
-        # weglassen"): keine Einleitungszeile mehr vor dem Modul-Glossar --
-        # die fett gesetzten Modulnamen darin sind selbsterklaerend genug.
-        top_in = _modul_glossar_box(fig, ax, fig_w, fig_h, margin_in, top_in, table_width_in, _MODUL_GLOSSAR)
-        top_in -= 0.09
-
+        # NEU (Beat, 18.9.2026: "der Hinweis zur Methodik bitte unterhalb der
+        # Kästchen der Renditebetrachtung"): stand vorher direkt unter der
+        # Wirtschaftlichkeits-Tabelle (vor "Renditebetrachtung"), jetzt hier --
+        # erklaert u.a., wieso Amortisationsdauer/LCOS/Kapitalverzinsung
+        # (kreditfreie Investition) und "Gewinn/Verlust (netto)" oben
+        # (Annuitätendarlehen) unterschiedliche Finanzierungsannahmen nutzen
+        # und deshalb auseinanderlaufen koennen (Beats fruehere Frage dazu).
         methodik_text = (
             "Hinweis zur Methodik: LCOS/Amortisationsdauer/Kapitalverzinsung rechnen ohne die "
             "Positionen „Amortisation“/„Kapitalkosten“ (kreditfreie Investition) -- „Gewinn/Verlust "
@@ -2405,14 +2753,16 @@ def build_pdf_report(
             transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM,
             va="top", ha="left", style="italic", linespacing=1.5,
         )
-        top_in -= line_h_in * len(methodik_zeilen) + 0.12
+        top_in -= line_h_in * len(methodik_zeilen) + 0.18
 
         # NEU (Beats Frage "wieso sagt der Report eine Jahresbetrachtung,
         # obwohl es nur 3 Monate sind"): bei einem Teil-Jahr-Szenario sind
         # diese drei Kennzahlen auf Basis der beobachteten Werte auf ein
         # volles Jahr HOCHGERECHNET (siehe build_rendite_kennzahlen()) --
         # das wird hier explizit vermerkt, damit es nicht mit einer echten
-        # Jahresmessung verwechselt wird.
+        # Jahresmessung verwechselt wird. Steht bewusst DIREKT bei den
+        # Kacheln, auf die es sich bezieht (vorher stand dieser Hinweis ganz
+        # am Seitenende, nach der PV-Abriegelung-Sektion).
         if not dauer_ist_vollejahr:
             # Text ist bei realistischen Seitenbreiten (A4, 0.5in Rand) zu
             # lang fuer eine Zeile -- manuell umbrechen (textwrap statt
@@ -2431,6 +2781,35 @@ def build_pdf_report(
                 transform=ax.transAxes, fontsize=7.6, color=_TEXT_DIM,
                 va="top", ha="left", style="italic", linespacing=1.5,
             )
+            top_in -= line_h_in * len(hinweis_zeilen) + 0.12
+
+        # ---- NEU (Beat, 17.9.2026, VEREINFACHT 18.9.2026: "ich hätte gerne
+        # dass nur 1 Wert gezeigt wird: Wert der Abschaltung ohne Batterie
+        # (Hinweiszeile weglassen)") -- die urspruengliche Version zeigte
+        # zusaetzlich "Mit Batterie"/"Mehrwert der Batterie" aus einem
+        # zweiten Optimierungslauf sowie eine erklaerende Hinweiszeile
+        # darunter; beides jetzt entfernt (siehe auch run_battery_analysis.py,
+        # wo der dafuer noetige zweite Solve dadurch ebenfalls entfaellt).
+        # Bleibt weiterhin bewusst GETRENNT von der Wirtschaftlichkeitsrechnung
+        # oben (die rechnet immer mit der in der Inputs.xlsx konfigurierten
+        # Einstellung) und wird komplett uebersprungen, wenn keine PV-Anlage
+        # vorhanden ist.
+        if pv_abriegelung and pv_abriegelung.get("pv_vorhanden"):
+            ohne_batt = pv_abriegelung.get("ohne_batterie") or {}
+
+            # NEU (Beat, 18.9.2026: "'- Wert-Analyse' bitte im Titel weglassen"):
+            _section_label(ax, fig_w, fig_h, margin_in, top_in,
+                            "PV-Abschaltung bei Negativpreisen", size=11)
+            top_in -= 0.24
+
+            abr_rows = [
+                {"label": "Wert der Abschaltung ohne Batterie",
+                 "value": _fmt_chf(ohne_batt.get("wert_abriegelung_chf", 0.0))},
+            ]
+            top_in = _draw_bordered_table(ax, fig_w, fig_h, margin_in, top_in, table_width_in, abr_rows,
+                                           row_h_in=0.27)
+            top_in -= 0.10
+
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2728,6 +3107,7 @@ def build_pdf_report(
         "peak_tabelle": peak_tabelle,
         "nur_batterie": nur_batterie,
         "kumulierte_ertraege": kumulierte_ertraege,
+        "pv_abriegelung": pv_abriegelung,
     }
     # monatstabelle/monatstabelle_ohne/profil_ohne/peak_tabelle_ohne existieren
     # nur im Nicht-nur_batterie-Zweig (siehe oben) -- bei einem reinen

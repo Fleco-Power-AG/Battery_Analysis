@@ -1,0 +1,2 @@
+SDL Preise mehr daten und dann je nach ausgewählten jahr machen, SDL Preise aufteilen für alle jahre in "kunde und markt"
+was soll die Finanzsicht zeigen, markt oder Kundenerträge?
