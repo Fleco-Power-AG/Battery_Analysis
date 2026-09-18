@@ -15,3 +15,8 @@ env/
 
 # Output komplett ignorieren
 Output/
+
+# Excel- und PDF-Dateien nur im Hauptordner nicht synchronisieren
+# (führendes "/" = nur direkt hier, nicht in Unterordnern wie Vorlagen/, Input/, Output/, Code/, Dokumente/)
+/*.xlsx
+/*.pdf
