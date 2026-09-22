@@ -1,17 +1,16 @@
-First time:
+First time setup
 
-**Installation**
-1. Miniconda installieren: https://docs.conda.io/en/latest/miniconda.html
-2. Repo klonen:
-   open terminal (cmd) and navigate in Folder where you want to have the "working Folder"
+1. Install Miniconda: https://docs.conda.io/en/latest/miniconda.html (skip if Anaconda or Miniconda is already installed)
+2. Clone the repo:
+   Open a terminal (cmd), navigate to the folder where you want your working folder, then run:
    git clone https://github.com/Fleco-Power-AG/Battery_Analysis
-3. setup.bat doubleclick (creates environment "batterieanalyse")
+3. Double-click setup.bat (creates the "batterieanalyse" environment)
 
 
-** run battery analysis**
-1. creat input-Excel for your configuration:
-	1.1 take "setup/case" out of folder "Vorlagen" and copy to the root-folder
-	1.2 adjust input-excel for your case (Name can be edited, but make sure it still starts Inputs_xxxxxxx
-2. run_battery_analysis.bat doubleclick ->  in pop-up, select your input-excel
-3. Validate Output and check report
+Running a battery analysis
 
+1. Create an input Excel file for your configuration:
+   1.1 Copy the template matching your setup/case from the "Vorlagen" folder into the root folder.
+   1.2 Adjust the input Excel for your case (the name can be edited, but it must still start with "Inputs_").
+2. Double-click run_battery_analysis.bat. Drag your input Excel file (from the root-Folder, not the "Vorlagen") into the console window that opens and press Enter (or drag the file directly onto the run_battery_analysis.bat icon instead, which passes it in automatically without any prompt).
+3. Validate the output and check the report.

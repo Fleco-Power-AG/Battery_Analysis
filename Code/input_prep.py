@@ -56,6 +56,7 @@ Benoetigte Pakete: pandas, openpyxl, requests
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import os
 import re
@@ -1110,15 +1111,50 @@ def main(
     # befuellten (Voll-Jahr-)Dateien aendert das nichts (n_valid == n_rows-1).
     n_valid = next((i for i, v in enumerate(zeit_raw) if v is None), len(zeit_raw))
     if n_valid < len(zeit_raw):
-        print(
-            f"  HINWEIS: Zeitreihen!A ist nur fuer {n_valid} von {len(zeit_raw)} "
-            f"Zeilen befuellt (erste leere Zeit-Zelle in Zeile {n_valid + 2}) -- "
-            "Szenario wird auf diese Laenge begrenzt. Andere Spalten (Last, "
-            "SRL-Preise etc.) koennen ueber diesen Zeitraum hinaus noch Werte "
-            "enthalten -- diese werden dann NICHT verwendet. Falls ein "
-            "vollstaendiges Jahr gewuenscht ist, bitte Spalte A (Zeit) "
-            "vollstaendig befuellen."
-        )
+        # NEU (Beat, 22.9.2026: "bis 35136 ist nur bei einem Schaltjahr"):
+        # das Zeitreihen-Sheet-TEMPLATE ist fix auf 35136 Zeilen ausgelegt
+        # (366 Tage x 96 Viertelstunden -- also ein SCHALTJAHR), damit auch
+        # Schaltjahr-Szenarien reinpassen. Ein normales (Nicht-Schalt-)Jahr
+        # braucht aber nur 35040 Zeilen (365 x 96) -- fuer so ein Jahr ist
+        # n_valid=35040 bereits VOLLSTAENDIG, obwohl es kleiner ist als die
+        # Template-Kapazitaet len(zeit_raw)=35136. Die bisherige Meldung hat
+        # das nicht unterschieden und faelschlich immer "bitte vollstaendig
+        # befuellen" empfohlen, selbst wenn das Szenario schon ein komplettes
+        # (Nicht-Schalt-)Jahr war. Fix: die fuer das TATSAECHLICHE Jahr des
+        # ersten Zeitstempels noetige Zeilenzahl (365 bzw. 366 Tage) wird
+        # jetzt konkret berechnet und nur gewarnt, wenn n_valid davon
+        # tatsaechlich weniger ist.
+        erster_zeitstempel = zeit_raw[0] if zeit_raw and zeit_raw[0] is not None else None
+        erwartete_zeilen_fuer_jahr = None
+        if erster_zeitstempel is not None:
+            jahr_start = erster_zeitstempel.year if hasattr(erster_zeitstempel, "year") else None
+            if jahr_start is not None:
+                tage_im_jahr = 366 if calendar.isleap(jahr_start) else 365
+                erwartete_zeilen_fuer_jahr = tage_im_jahr * 96  # 96 Viertelstunden/Tag
+
+        if erwartete_zeilen_fuer_jahr is not None and n_valid >= erwartete_zeilen_fuer_jahr:
+            # Bereits ein vollstaendiges (Nicht-Schalt-)Jahr -- die
+            # ungenutzten restlichen Zeilen sind nur die Schaltjahr-Reserve
+            # des Templates, kein fehlender Input. Kein Hinweis noetig.
+            pass
+        else:
+            hinweis_jahr_txt = (
+                f" (ein vollstaendiges Jahr ab {erster_zeitstempel.strftime('%d.%m.%Y')} "
+                f"braucht {erwartete_zeilen_fuer_jahr} Zeilen, "
+                f"{'Schaltjahr' if erwartete_zeilen_fuer_jahr == 366 * 96 else 'kein Schaltjahr'})"
+                if erwartete_zeilen_fuer_jahr is not None else ""
+            )
+            print(
+                f"  HINWEIS: Zeitreihen!A ist nur fuer {n_valid} von {len(zeit_raw)} "
+                f"Zeilen befuellt (erste leere Zeit-Zelle in Zeile {n_valid + 2}){hinweis_jahr_txt} -- "
+                "Szenario wird auf diese Laenge begrenzt. Andere Spalten (Last, "
+                "SRL-Preise etc.) koennen ueber diesen Zeitraum hinaus noch Werte "
+                "enthalten -- diese werden dann NICHT verwendet. Falls ein "
+                "vollstaendiges Jahr gewuenscht ist, bitte Spalte A (Zeit) "
+                "entsprechend vollstaendig befuellen. (Hinweis: die Sheet-Kapazitaet "
+                "von 35136 Zeilen ist fuer ein Schaltjahr ausgelegt -- ein normales "
+                "Jahr braucht nur 35040.)"
+            )
         zeit_raw = zeit_raw[:n_valid]
         n_rows = n_valid + 1  # +1, da range(2, n_rows+1) ab Zeile 2 zaehlt
 
