@@ -2837,7 +2837,19 @@ def build_pdf_report(
         # oben (die rechnet immer mit der in der Inputs.xlsx konfigurierten
         # Einstellung) und wird komplett uebersprungen, wenn keine PV-Anlage
         # vorhanden ist.
-        if pv_abriegelung and pv_abriegelung.get("pv_vorhanden"):
+        #
+        # NEU (Beat, 22.9.2026: "soll nur vorhanden sein, wenn PV das
+        # Preisschema Spot hat"): "Wert der Abschaltung" (siehe
+        # compute_pv_abriegelung_wert_ohne_batterie() oben) beruht auf den
+        # PER-ZEITSCHRITT tatsaechlich negativen PV-Ruecklieferpreisen
+        # (zeitreihen["rueckliefertarif"]). Nur beim Schema "Spot" bildet
+        # dieser Wert echte, volatile Markt-Negativpreise ab -- bei
+        # Fixtarif/RMP/RMP_Floor ist der Ruecklieferpreis pro Zeitschritt
+        # entweder konstant oder ein traeger Quartalswert und wird in der
+        # Praxis nie/kaum negativ, wodurch die ganze Analyse dort inhaltlich
+        # bedeutungslos waere (haette praktisch immer "Wert = 0 CHF").
+        pv_schema_norm = str(params.get("rueckliefer_pv_schema") or "").strip().lower()
+        if pv_abriegelung and pv_abriegelung.get("pv_vorhanden") and pv_schema_norm == "spot":
             ohne_batt = pv_abriegelung.get("ohne_batterie") or {}
 
             # NEU (Beat, 18.9.2026: "'- Wert-Analyse' bitte im Titel weglassen"):
