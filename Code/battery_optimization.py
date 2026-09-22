@@ -323,6 +323,15 @@ def read_inputs(path: str = INPUT_PATH):
         "vollzyklen": wsP["C37"].value,
         "ladegrenze_soc": wsP["C39"].value / 100.0,
         "entladegrenze_soc": wsP["C40"].value / 100.0,
+        # NEU (Beats Erweiterung 22.9.2026): "gegebenenfalls" ein fixer
+        # TOTAL-Investitionsbetrag (CHF) statt des CHF/kWh-Ansatzes (C34) --
+        # nur ein Rohwert hier mitgelesen, die eigentliche Ja/Nein-Auswertung
+        # (nur eine Zahl > 0 gilt als gesetzt, siehe capital_costs()) macht
+        # capital_costs() selbst. Absichtlich hier NICHT hart geprueft/
+        # gecrasht wie bei C35 (Unterhalt) -- C41 ist per Definition OPTIONAL
+        # ("gegebenenfalls"), ein leeres/nicht-numerisches Feld ist der
+        # Normalfall und soll NICHT zu einem Fehler fuehren.
+        "investitionskosten_fix": wsP["C41"].value,
         "max_einspeisung": wsP["C43"].value,
         "max_bezug": wsP["C44"].value,
         # NEU (Beats zwei zusaetzliche Netz-Parameter): eigene Grenzwerte fuer
@@ -1667,7 +1676,9 @@ def capital_costs(params: dict, wacc: float = 0.03, entladeenergie_kwh: float | 
     kann, ohne main() ein weiteres Mal umzubauen.
 
     Liefert ein Dict mit:
-      capex: Investitionssumme (CHF)
+      capex: Investitionssumme (CHF) -- entweder Parameter!C41 (fixer
+          Totalbetrag, falls angegeben) oder kapazitaet * invest_kosten_kwh
+          (C29 * C34), siehe "CAPEX-BESTIMMUNG" unten
       lebenszeit: Jahre (Parameter!C27)
       wacc: verwendeter Kapitalkostensatz (Default-Annahme, siehe unten)
       annuitaet: jaehrliche Investitions-Annuitaet (Kapitalwiedergewinnung,
@@ -1700,8 +1711,23 @@ def capital_costs(params: dict, wacc: float = 0.03, entladeenergie_kwh: float | 
     konsistent mit der Ein-Jahres-Betrachtung des gesamten Modells: wir
     nehmen an, dass sich das simulierte Jahr ueber die ganze Lebenszeit
     identisch wiederholt).
+
+    CAPEX-BESTIMMUNG (NEU, Beat 22.9.2026: "jetzt habe ich noch einen
+    Parameter beim Input hinzugefuegt, in C41 stehen gegebenenfalls die
+    Investitionskosten. Wenn also dort eine Zahl steht, sollen das die
+    Investitionskosten sein"): steht in Parameter!C41
+    (params["investitionskosten_fix"]) eine Zahl > 0, wird DIESER fixe
+    Totalbetrag (CHF) direkt als capex verwendet -- der sonst uebliche Ansatz
+    kapazitaet * invest_kosten_kwh (C29 * C34, CHF/kWh) wird dann ignoriert.
+    Ist C41 leer/keine Zahl/0 (der Normalfall, "gegebenenfalls"), bleibt es
+    beim bisherigen CHF/kWh-Ansatz -- rueckwaertskompatibel fuer alle
+    bestehenden Input-Dateien ohne C41.
     """
-    capex = params["kapazitaet"] * params["invest_kosten_kwh"]
+    investitionskosten_fix = params.get("investitionskosten_fix")
+    if isinstance(investitionskosten_fix, (int, float)) and investitionskosten_fix > 1e-9:
+        capex = float(investitionskosten_fix)
+    else:
+        capex = params["kapazitaet"] * params["invest_kosten_kwh"]
     lebenszeit = params["lebenszeit"]
     annuitaet = capex * (wacc * (1 + wacc) ** lebenszeit) / ((1 + wacc) ** lebenszeit - 1)
     unterhalt = params["unterhalt_kosten"]  # Parameter!C26 ist bereits CHF/Jahr (nicht mehr CHF/kWh)
@@ -1736,6 +1762,8 @@ def main(
     solver: str = SOLVER,
     symbolic_solver_labels: bool | None = None,
     params_override: dict | None = None,
+    preloaded_params: dict | None = None,
+    preloaded_zeitreihen: pd.DataFrame | None = None,
 ):
     """
     peakshaving_aktiv=None (Default): automatisch aus Parameter!C9 abgeleitet
@@ -1747,21 +1775,52 @@ def main(
         Diagnose-Werkzeug fuer den "duplicates in objective and matrix"-
         Absturz, nur bei Bedarf explizit auf True/False setzen.
     params_override=None (Default): NEU (15.9.2026, fuer
-        optimale_batteriegroesse.py) -- optionales Dict, dessen Eintraege
+        battery_sizing.py) -- optionales Dict, dessen Eintraege
         NACH dem Excel-Einlesen in `params` ueberschrieben werden (z.B.
         {"kapazitaet": 400.0, "leistung": 100.0}). Damit kann ein Sweep-Skript
         denselben main()-Ablauf fuer viele Batteriegroessen wiederverwenden,
         ohne fuer jede Kombination eine eigene Excel-Datei anzulegen. Das
         Excel bleibt die Basis/Quelle der Wahrheit fuer alle NICHT
         ueberschriebenen Parameter.
+    preloaded_params/preloaded_zeitreihen=None (Default): NEU (22.9.2026,
+        Beat: "man muss doch nicht fuer jedes Problem das ganze Input neu
+        laden, da sich ja jeweils nur die Batterie-Parameter aendern") --
+        wenn BEIDE gesetzt sind, wird `read_inputs(input_path)` komplett
+        uebersprungen und stattdessen direkt mit diesen bereits eingelesenen
+        Objekten weitergearbeitet. Fuer battery_sizing.py gedacht: dort wird
+        dieselbe input_lp.xlsx fuer alle Rasterpunkte identisch eingelesen
+        (nur kapazitaet/leistung/unterhalt_kosten unterscheiden sich via
+        params_override) -- das teure openpyxl-Einlesen/Parsen eines
+        35'000+-Zeilen-Sheets EINMAL zu machen statt einmal PRO Rasterpunkt
+        spart bei 18 Rasterpunkten 17 unnoetige Excel-Lesevorgaenge. `params`
+        wird trotzdem IMMER defensiv kopiert (siehe unten), `zeitreihen` wird
+        nirgends nach read_inputs() mutiert (verifiziert) und kann deshalb
+        gefahrlos wiederverwendet/geteilt werden -- bei paralleler Ausfuehrung
+        (ProcessPoolExecutor) bekommt ohnehin jeder Worker-Prozess automatisch
+        seine eigene, unabhaengige Kopie durch die Prozess-Grenze (Pickling).
+        Wenn `input_path` bei einem nicht-preloaded Aufruf angegeben wird,
+        bleibt das Verhalten exakt wie bisher (read_inputs() wird normal
+        aufgerufen) -- volle Rueckwaertskompatibilitaet.
     """
-    print(f"Lese {input_path} ...")
-    params, zeitreihen = read_inputs(input_path)
+    if preloaded_params is not None and preloaded_zeitreihen is not None:
+        print(f"Verwende bereits eingelesene Parameter/Zeitreihen fuer {input_path} "
+              "(kein erneutes Excel-Einlesen).")
+        params, zeitreihen = preloaded_params, preloaded_zeitreihen
+    else:
+        print(f"Lese {input_path} ...")
+        params, zeitreihen = read_inputs(input_path)
 
     if params_override:
         print(f"Ueberschreibe Parameter (params_override): {params_override}")
         params = dict(params)  # Kopie, damit der Aufrufer sein Original-Dict wiederverwenden kann
         params.update(params_override)
+    else:
+        # NEU: auch OHNE params_override defensiv kopieren, sobald preloaded
+        # Objekte im Spiel sind -- verhindert, dass irgendeine zukuenftige
+        # Code-Aenderung `params` in main() versehentlich in-place mutiert
+        # und dadurch das vom Aufrufer (z.B. sweep()) wiederverwendete
+        # Original-Dict fuer den naechsten Rasterpunkt verfaelscht.
+        params = dict(params)
 
     if peakshaving_aktiv is None:
         peakshaving_aktiv = determine_peakshaving_aktiv(params)
@@ -1865,10 +1924,17 @@ def main(
     # condition: unknown"-Absturz): Solver-Log-Datei neben der Eingabedatei
     # ablegen, damit der volle CBC-Output bei einem erneuten Absturz einfach
     # mitgeschickt werden kann, siehe solve()-Docstring.
+    # NEU (Beat, 22.9.2026, im Zuge der Parallelisierung von battery_sizing.py):
+    # die Zeitstempel-Aufloesung (Sekunden) reichte nicht mehr aus, sobald
+    # mehrere Solves gleichzeitig in separaten Prozessen gegen dieselbe
+    # input_lp-Datei laufen (Raster-Sweep) -- alle in derselben Sekunde
+    # gestarteten Solves haetten identische Log-Dateinamen bekommen und sich
+    # gegenseitig ueberschrieben. Zusaetzlich die Prozess-ID anhaengen macht
+    # jeden Dateinamen eindeutig, auch bei gleichzeitigem Start.
     logfile = os.path.join(
         os.path.dirname(os.path.abspath(input_path)),
         f"solver_log_{os.path.splitext(os.path.basename(input_path))[0]}_"
-        f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+        f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_pid{os.getpid()}.log",
     )
     print(f"Loese mit Solver '{solver}' ... (Solver-Log: {logfile})")
     solve(om, solver, logfile=logfile, symbolic_solver_labels=symbolic_solver_labels)
