@@ -2531,10 +2531,30 @@ def build_pdf_report(
         pv_vorhanden_zsf = not _ist_wert_null(params.get("dc_leistung"))
         last_vorhanden_raw = params.get("last_vorhanden")
         last_vorhanden_zsf = str(last_vorhanden_raw).strip().lower() == "ja" if last_vorhanden_raw is not None else False
+        # NEU (Beat, 22.9.2026): vorgezogen aus dem weiter unten stehenden
+        # Tabellen-Code (Tarifschema-(Bezug)-Weiche), da diese Bedingung jetzt
+        # auch fuer den Fliesstext oben (Untersuchte Effekte) gebraucht wird --
+        # Netzbezug ist nur ueberhaupt moeglich, wenn eine Last vorhanden ist
+        # ODER die Batterie aus dem Netz laden darf.
+        batteriebezug_erlaubt_zsf = not _ist_wert_null(params.get("max_bezug_batterie"))
+        bezug_tarif_relevant_zsf = last_vorhanden_zsf or batteriebezug_erlaubt_zsf
         zeitraum_txt = (
             f"{_scenario_start_orig.strftime('%d.%m.%Y')}"
             f"–{(ts.index[-1]).strftime('%d.%m.%Y')}" if len(ts.index) else "unbekannt"
         )
+
+        def _und_liste(items):
+            """Deutsche Aufzaehlung mit 'und' vor dem letzten Element statt
+            Komma (z.B. ['A','B','C'] -> 'A, B und C') -- NEU auf Beats
+            Wunsch (22.9.2026): 'System besteht...' soll alle vorhandenen
+            Komponenten aufzaehlen, aber die letzte mit einem 'und'."""
+            items = [i for i in items if i]
+            if not items:
+                return ""
+            if len(items) == 1:
+                return items[0]
+            return ", ".join(items[:-1]) + " und " + items[-1]
+
         komponenten = []
         komponenten.append("einer PV-Anlage" if pv_vorhanden_zsf else None)
         komponenten.append("einem Batteriespeicher")
@@ -2544,17 +2564,40 @@ def build_pdf_report(
         # entfernt (galt ohnehin nur fuer den ZEITRAUM/die Optimierung selbst,
         # nicht fuer den Lastgang als solchen).
         komponenten.append("einem Lastgang" if last_vorhanden_zsf else None)
-        komponenten_txt = ", ".join(k for k in komponenten if k)
+        komponenten_txt = _und_liste(komponenten)
+
+        # NEU (Beat, 22.9.2026: "bei 'Untersucht werden...' sollen auch nur
+        # die Parameter stehen, die wirklich untersucht werden koennen"):
+        # Eigenverbrauch und Lastspitzen sind ohne Lastgang strukturell immer
+        # 0 (siehe Eigenverbrauch-ohne-Last-Fix bzw. Lastspitzen-Chart), und
+        # Netzbezug ist nur relevant, wenn ueberhaupt ein Netzbezug moeglich
+        # ist (Last vorhanden ODER Batterie darf aus dem Netz laden, s.o.) --
+        # diese drei werden deshalb jetzt bedingt aufgefuehrt statt immer alle
+        # drei pauschal zu nennen.
+        effekte = []
+        effekte.append("Eigenverbrauch" if last_vorhanden_zsf else None)
+        effekte.append("Netzbezug" if bezug_tarif_relevant_zsf else None)
+        effekte.append("Lastspitzen" if last_vorhanden_zsf else None)
+        effekte_txt = _und_liste(effekte)
 
         # NEU (Beat, 18.9.2026: "auf Seite 1 bitte diesen Satz weglassen: ...die
         # zugrundeliegenden Annahmen sind im Detail auf Seite 0 (Eingabeparameter)
         # dokumentiert."): Schlussteil des Satzes entfernt, Rest unveraendert.
+        if effekte_txt:
+            effekte_satz = (
+                f"Untersucht werden die Effekte auf {effekte_txt} sowie die "
+                f"wirtschaftliche Rendite der Investition."
+            )
+        else:
+            # Kein Eigenverbrauch/Netzbezug/Lastspitzen sinnvoll untersuchbar
+            # (z.B. reines Batterie-System ohne Last und ohne Netzladung) --
+            # dann bleibt nur die Renditebetrachtung uebrig.
+            effekte_satz = "Untersucht wird die wirtschaftliche Rendite der Investition."
+
         zusammenfassung_text = (
             f"Dieser Bericht vergleicht den Betrieb mit und ohne Batteriespeicher über den "
             f"Zeitraum {zeitraum_txt} ({wirtschaftlichkeit_titel.split('—')[-1].strip()}). "
-            f"Das analysierte System besteht aus {komponenten_txt}. Untersucht werden die "
-            f"Effekte auf Eigenverbrauch, Netzbezug, Lastspitzen sowie die wirtschaftliche "
-            f"Rendite der Investition."
+            f"Das analysierte System besteht aus {komponenten_txt}. {effekte_satz}"
         )
         content1_top_in = _prose_box(
             ax1, fig1_w, fig1_h, margin1_in, content1_top_in, box1_width_in, zusammenfassung_text,
@@ -2593,9 +2636,9 @@ def build_pdf_report(
         # build_input_summary_rows()/Seite 0): Tarifschema (Bezug) -- und
         # damit auch die HT/NT-Tarifzeilen -- nur zeigen, wenn ueberhaupt ein
         # Netzbezug moeglich ist (Last vorhanden ODER Batterie darf aus dem
-        # Netz laden).
-        batteriebezug_erlaubt_zsf = not _ist_wert_null(params.get("max_bezug_batterie"))
-        bezug_tarif_relevant_zsf = last_vorhanden_zsf or batteriebezug_erlaubt_zsf
+        # Netz laden). `bezug_tarif_relevant_zsf` wurde bereits weiter oben
+        # (fuer den Fliesstext "Untersucht werden...") berechnet, hier nur
+        # noch weiterverwendet.
 
         # NEU (Beats Rueckmeldung "bei HT/NT bitte noch die Tarife angeben"):
         # HT/NT-Tarifzeilen nur, wenn das Bezugstarifschema tatsaechlich
