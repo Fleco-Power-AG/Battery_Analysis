@@ -79,19 +79,43 @@ groessendetection aber in einem sinnvollen Verhaeltnis von Last und PV")
        fester Default-Bereich (KAPAZITAETEN_FALLBACK_KWH) mit Konsolen-
        Hinweis.
 
-  RASTER UM DIE BASIS (baue_raster(), RELATIV/PROZENTUAL statt absolut):
-    Kapazitaetsstufen = Basis * (1 + n * KAPAZITAETS_SCHRITT_PCT),
-    fuer n = -KAPAZITAETS_ANZAHL_SCHRITTE .. +KAPAZITAETS_ANZAHL_SCHRITTE
-    (Default: 10% pro Schritt, je 3 Schritte hoch/runter -> 7 Kapazitaets-
-    stufen von 0.7x bis 1.3x der Basis, auf "schoene" Zehner-/Fuenfziger-/
-    Hunderter-Schritte gerundet, siehe _rund_schoen()). Jede Kapazitaetsstufe
+  RASTER UM DIE BASIS (baue_raster(), RELATIV/PROZENTUAL statt absolut --
+  NEU, Beat 24.9.2026: "koennen wir die range der kapazitaet etwas erhoehen
+  zu 50, 100, 200% schritten?"):
+    Kapazitaetsstufen = Basis * (1 +/- p), fuer jeden Prozentsatz p in
+    KAPAZITAETS_SCHRITT_PROZENTE (Default [0.50, 1.00, 2.00] -> Multipli-
+    katoren 1 +/- 0.5/1.0/2.0 = {-1.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0}; die
+    beiden <= 0 werden verworfen, es bleiben 0.5x/1.0x/1.5x/2.0x/3.0x der
+    Basis -- 5 Kapazitaetsstufen), auf "schoene" Zehner-/Fuenfziger-/
+    Hunderter-Schritte gerundet, siehe _rund_schoen(). Jede Kapazitaetsstufe
     wird mit denselben drei C-Raten (0.25/0.5/1.0, Batterie-Fachbegriff: "wie
     schnell relativ zur Kapazitaet geladen/entladen werden kann", siehe
     C_RATEN) kombiniert; die LEISTUNG ergibt sich daraus wie urspruenglich
     als Leistung[kW] = C-Rate * Kapazitaet[kWh] (KEINE Division mehr --
-    das war der Verstaerkungseffekt in Version 2 oben). Macht zusammen 7
-    Kapazitaetsstufen x 3 C-Raten = 21 Rasterpunkte im Default (alles ueber
+    das war der Verstaerkungseffekt in Version 2 oben). Macht zusammen 5
+    Kapazitaetsstufen x 3 C-Raten = 15 Rasterpunkte im Default (alles ueber
     die Konstanten am Skriptanfang aenderbar).
+
+  AUTOMATISCHE RASTER-ERWEITERUNG (NEU, Beat 24.9.2026: "bei allen Runs die
+  ich gemacht habe war C=1 und die groesste Batterie-Konfiguration die beste
+  Wahl ... kann es sein dass das Autosizing auf zu kleine Batterien geht
+  oder/oder die Kosten fuer die groessere Batterie nicht sauber eingelesen
+  werden?"):
+    Diagnose anhand eines konkreten Sweeps von Beat: die Kosten wurden
+    korrekt gelesen/angewendet (Capex/Annuitaet skalierten sauber linear mit
+    Kapazitaet * dem C-Rate-spezifischen CHF/kWh-Preis, siehe
+    INVEST_KOSTEN_KWH_JE_C_RATE) -- das Problem war stattdessen, dass die
+    Gewinnkurve am oberen Rand des getesteten Rasters (3x Basis) noch
+    STIEG, statt ein inneres Maximum zu erreichen. "Die groesste getestete
+    Batterie gewinnt" ist in diesem Fall zwangslaeufig, unabhaengig von den
+    Kosten -- das Raster hat den eigentlichen wirtschaftlichen Peak schlicht
+    nie getestet. sweep() prueft deshalb jetzt nach jeder Rasterrunde, ob das
+    bisher beste Ergebnis bei der GROESSTEN getesteten Kapazitaet liegt, und
+    haengt in diesem Fall automatisch eine weitere, noch groessere
+    Kapazitaetsstufe an (+1x Basis pro Runde, siehe
+    KAPAZITAETS_ERWEITERUNGS_SCHRITT) -- so lange, bis entweder ein echtes
+    inneres Maximum gefunden wird oder KAPAZITAETS_MAX_ERWEITERUNGEN erreicht
+    ist (Sicherheitslimit fuer Szenarien ohne natuerliche Saettigung).
 
 UNTERHALTKOSTEN-ANNAHME (bitte mit Beat pruefen)
 --------------------------------------------------
@@ -129,8 +153,8 @@ schneller), da jeder Rasterpunkt ein komplett unabhaengiger Solve ist. Steuerbar
 per CLI-Flag `--parallel N` (`--parallel 1` = alter, sequenzieller Ablauf,
 z.B. zum Debuggen, da die Konsolenausgabe dann strikt in Raster-Reihenfolge
 erscheint). Zusaetzlich fuer einen ersten schnellen Test weiterhin moeglich:
-die Konstanten KAPAZITAETS_ANZAHL_SCHRITTE/C_RATEN unten auf weniger Werte
-kuerzen (z.B. nur `C_RATEN = [1.0]` und `KAPAZITAETS_ANZAHL_SCHRITTE = 0`
+die Konstanten KAPAZITAETS_SCHRITT_PROZENTE/C_RATEN unten auf weniger Werte
+kuerzen (z.B. nur `C_RATEN = [1.0]` und `KAPAZITAETS_SCHRITT_PROZENTE = []`
 fuer einen einzelnen Testlauf mit nur der Basis-Kapazitaet).
 
 TESTABDECKUNG / SCHLANKE ABHAENGIGKEITEN
@@ -189,11 +213,55 @@ C_RATEN = [0.25, 0.5, 1.0]
 # proportional zur tatsaechlichen Anlagengroesse bleibt (siehe Modulkopf/
 # Historie -- das behebt sowohl die MW-Ausreisser bei grossen Anlagen als
 # auch die absurden 1000er-kWh-Vorschlaege bei einer kleinen 30-kWh-Last).
-KAPAZITAETS_SCHRITT_PCT = 0.10   # 10% Basis-Abweichung pro Schritt
-KAPAZITAETS_ANZAHL_SCHRITTE = 3  # je 3 Schritte hoch/runter -> 0.7x .. 1.3x der Basis
+#
+# NEU (Beat, 24.9.2026: "koennen wir die range der kapazitaet etwas erhoehen
+# zu 50, 100, 200% schritten?") -- statt eines EINZELNEN, gleich grossen
+# Prozentsatzes pro Schritt (vorher: 3x 10%) jetzt eine LISTE unterschiedlich
+# grosser Schritte, symmetrisch um die Basis (+/- je Eintrag). Mit den
+# Default-Werten unten ergibt das Multiplikatoren 1 +/- 0.5/1.0/2.0 =
+# {-1.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0} -- die beiden <= 0 (Basis -100%/-200%)
+# werden wie gehabt automatisch verworfen (siehe baue_raster()), es bleiben
+# 0.5x/1.0x/1.5x/2.0x/3.0x der Basis.
+KAPAZITAETS_SCHRITT_PROZENTE = [0.50, 1.00, 2.00]
 # Nur falls das Profil GAR NICHTS liefert (weder PV-Ueberschuss noch Last,
 # reines Arbitrage-/SRL-System ohne beides) -- siehe bestimme_kapazitaets_basis().
 KAPAZITAETEN_FALLBACK_KWH = [100.0, 200.0, 300.0, 500.0, 750.0, 1000.0]
+
+# NEU (Beat, 24.9.2026: "bei allen Runs die ich gemacht habe war C=1 und die
+# groesste Batterie-Konfiguration die beste Wahl ... kann es sein dass das
+# Autosizing auf zu kleine Batterien geht?") -- wenn das beste Ergebnis eines
+# Sweeps bei der GROESSTEN getesteten Kapazitaet liegt, ist das Raster
+# hoechstwahrscheinlich zu schmal (die Gewinnkurve war am oberen Rand noch
+# steigend, der eigentliche Peak wurde also nie getestet) -- NICHT
+# zwangslaeufig ein Kosten-Bug. sweep() erweitert das Kapazitaets-Raster in
+# diesem Fall jetzt AUTOMATISCH um weitere, groessere Stufen (je +1x Basis),
+# bis entweder ein echtes (inneres) Maximum gefunden wird oder dieses
+# Sicherheitslimit erreicht ist (falls die Gewinnkurve z.B. wegen sehr hohem
+# Arbitrage-Potenzial gar kein natuerliches Maximum hat). Gilt NUR, wenn eine
+# Profil-Basis > 0 hergeleitet werden konnte (nicht fuer den festen
+# KAPAZITAETEN_FALLBACK_KWH-Bereich, da dort keine proportionale Erweiterung
+# moeglich ist).
+KAPAZITAETS_AUTO_ERWEITERN = True
+KAPAZITAETS_ERWEITERUNGS_SCHRITT = 1.0  # je Runde: + 1x Basis oben drauf
+KAPAZITAETS_MAX_ERWEITERUNGEN = 3
+
+# NEU (Beat, 24.9.2026: "jetzt muessen wir noch die batteriekosten anpassen,
+# fuer 0.25 C 400CHF/kWh, 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh") --
+# schnellere Batterien (hoehere C-Rate) brauchen leistungsfaehigere Zellen/
+# Leistungselektronik und sind pro kWh teurer. Bisher wurde EIN einziger
+# CHF/kWh-Preis (aus Parameter!C34, oder aus C41 hergeleitet, siehe
+# battery_optimization.capital_costs()) fuer ALLE C-Raten im Sweep verwendet
+# -- das ignorierte diesen realen Kostenunterschied. Ersetzt/hat Vorrang vor
+# dem Excel-Wert FUER DEN SWEEP (nicht fuer den normalen Einzellauf via
+# run_battery_analysis.py -- dort bleibt C34/C41 unveraendert maassgeblich,
+# da es dort keine C-Rate-Achse gibt). Wird eine C-Rate hier verwendet
+# (siehe C_RATEN oben), die NICHT in dieser Tabelle steht, faellt sweep()
+# mit einer Konsolen-Warnung auf den Excel-Wert zurueck (siehe unten).
+INVEST_KOSTEN_KWH_JE_C_RATE = {
+    0.25: 400.0,
+    0.5: 500.0,
+    1.0: 700.0,
+}
 
 UNTERHALT_PROPORTIONAL_SKALIEREN = True
 WACC = 0.03  # gleiche Default-Annahme wie battery_optimization.capital_costs()
@@ -288,15 +356,18 @@ def baue_raster(
     dt_hours: float = 0.25,
 ) -> tuple[list[float], str]:
     """Baut die Liste der Kapazitaets-Rasterpunkte (kWh): PROZENTUALE Schritte
-    um die automatisch abgeleitete Basis (siehe bestimme_kapazitaets_basis())
-    -- Default +/- 3 Schritte a 10% -> 0.7x bis 1.3x der Basis, 'schoen'
-    gerundet, Duplikate entfernt, aufsteigend sortiert. Bewusst PROZENTUAL
-    (nicht mehr in fixen kWh- oder kW-Bloecken wie in frueheren Versionen --
-    siehe Modulkopf/Historie): das haelt die Spannweite IMMER proportional
-    zur tatsaechlichen Last-/PV-Groesse, egal ob 30 kWh oder 3 MWh Basis.
-    Ist keine Basis herleitbar (kein PV-Ueberschuss und keine Last), wird
-    stattdessen der feste Fallback-Bereich KAPAZITAETEN_FALLBACK_KWH
-    verwendet (keine Prozent-Schritte moeglich, da 0% von 0 immer 0 waere)."""
+    um die automatisch abgeleitete Basis (siehe bestimme_kapazitaets_basis()),
+    gemaess KAPAZITAETS_SCHRITT_PROZENTE symmetrisch (+/- je Eintrag) --
+    Default [0.50, 1.00, 2.00] -> Multiplikatoren 0.5x/1.0x/1.5x/2.0x/3.0x
+    der Basis (die rechnerisch <= 0 liegenden Stufen, hier Basis-100%/-200%,
+    werden automatisch verworfen, siehe unten), 'schoen' gerundet, Duplikate
+    entfernt, aufsteigend sortiert. Bewusst PROZENTUAL (nicht in fixen kWh-
+    oder kW-Bloecken wie in frueheren Versionen -- siehe Modulkopf/Historie):
+    das haelt die Spannweite IMMER proportional zur tatsaechlichen Last-/
+    PV-Groesse, egal ob 30 kWh oder 3 MWh Basis. Ist keine Basis herleitbar
+    (kein PV-Ueberschuss und keine Last), wird stattdessen der feste
+    Fallback-Bereich KAPAZITAETEN_FALLBACK_KWH verwendet (keine Prozent-
+    Schritte moeglich, da jeder Prozentsatz von 0 immer 0 waere)."""
     basis_kwh, herkunft = bestimme_kapazitaets_basis(pv_profile, last_profile, dt_hours)
     if basis_kwh <= 1e-6:
         print(f"  HINWEIS: {herkunft} -- verwende feste Default-Kapazitaeten "
@@ -304,13 +375,19 @@ def baue_raster(
         return list(KAPAZITAETEN_FALLBACK_KWH), herkunft
 
     print(f"  Kapazitaets-Basis: {basis_kwh:,.1f} kWh/Tag ({herkunft})")
-    schritte = range(-KAPAZITAETS_ANZAHL_SCHRITTE, KAPAZITAETS_ANZAHL_SCHRITTE + 1)
-    kapazitaeten = sorted({
-        _rund_schoen(basis_kwh * (1.0 + n * KAPAZITAETS_SCHRITT_PCT)) for n in schritte
-    })
-    kapazitaeten = [k for k in kapazitaeten if k > 0]
-    print(f"  Kapazitaets-Raster: {kapazitaeten} kWh (0.7x-1.3x der Basis, je kombiniert "
-          f"mit C-Raten {C_RATEN})")
+    alle_multiplikatoren = sorted(
+        {1.0} | {1.0 + vz * p for p in KAPAZITAETS_SCHRITT_PROZENTE for vz in (1, -1)}
+    )
+    alle_stufen = [_rund_schoen(basis_kwh * m) for m in alle_multiplikatoren]
+    kapazitaeten = sorted({k for k in alle_stufen if k > 0})
+
+    verworfen = len(alle_stufen) - len(kapazitaeten)
+    if verworfen:
+        print(f"  HINWEIS: {verworfen} Kapazitaetsstufe(n) <= 0 kWh wurden verworfen "
+              f"(Schritt-Prozentsatz >= 100% ist groesser als die Basis selbst).")
+
+    print(f"  Kapazitaets-Raster: {kapazitaeten} kWh (Multiplikatoren {alle_multiplikatoren} der "
+          f"Basis, je kombiniert mit C-Raten {C_RATEN})")
     return kapazitaeten, herkunft
 
 
@@ -340,6 +417,13 @@ def _kombination_rechnen(
     die Leistung ergibt sich rechnerisch als C-Rate * Kapazitaet, NICHT mehr
     umgekehrt (das Teilen durch C-Rate in der Zwischenversion hat kleine
     Ungenauigkeiten der Basis vervierfacht, siehe Modulkopf/Historie).
+
+    `invest_kosten_kwh` (NEU, Beat 24.9.2026: "batteriekosten anpassen, fuer
+    0.25 C 400CHF/kWh, 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh"): sweep()
+    reicht hier bereits den zu DIESER c_rate passenden Preis durch (aus
+    INVEST_KOSTEN_KWH_JE_C_RATE, mit Fallback auf den Excel-/C41-Wert fuer
+    nicht hinterlegte C-Raten) -- diese Funktion selbst muss die C-Rate also
+    nicht mehr extra nachschlagen.
 
     `params_original`/`zeitreihen_original` (Beat, 22.9.2026: "man muss doch
     nicht fuer jedes Problem das ganze Input neu laden, da sich ja jeweils
@@ -448,7 +532,13 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
     NICHT mehr die Raster-Reihenfolge (haengt davon ab, welcher Solve zuerst
     fertig wird) -- unproblematisch, da speichere_ergebnis_excel()/
     baue_heatmap_pdf() ohnehin ueber df.pivot(index=..., columns=...) gehen,
-    was automatisch nach Kapazitaet/C-Rate sortiert."""
+    was automatisch nach Kapazitaet/C-Rate sortiert.
+
+    NEU (siehe KAPAZITAETS_AUTO_ERWEITERN oben): die zurueckgegebene Anzahl
+    Zeilen kann groesser sein als das urspruengliche Kapazitaeten x C-Raten-
+    Raster, falls das Raster automatisch um weitere Kapazitaetsstufen
+    erweitert wurde (weil das beste Ergebnis sonst am oberen Rand gelegen
+    haette) -- siehe Konsolenausgabe fuer Details."""
     import battery_optimization  # lazy, siehe Modulkopf
 
     print("Lese Parameter/Zeitreihen (ohne Solve, nur fuer Raster-Bestimmung) ...")
@@ -457,6 +547,11 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
     last_profile = battery_optimization.build_last_profile(params_original, zeitreihen_original)
 
     kapazitaeten, _ = baue_raster(pv_profile, last_profile, battery_optimization.DT_HOURS)
+    # NEU (siehe KAPAZITAETS_AUTO_ERWEITERN oben): fuer die automatische
+    # Raster-Erweiterung wird die Basis separat noch einmal gebraucht (reine
+    # numpy-Berechnung, vernachlaessigbar teuer -- billiger als baue_raster()'s
+    # Rueckgabewert dafuer extra umzubauen).
+    basis_kwh, _ = bestimme_kapazitaets_basis(pv_profile, last_profile, battery_optimization.DT_HOURS)
 
     # NEU (Beat, 22.9.2026): Parameter!C41 kann "gegebenenfalls" einen FIXEN
     # Total-Investitionsbetrag (CHF) vorgeben statt des CHF/kWh-Ansatzes (C34)
@@ -475,18 +570,36 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
         and investitionskosten_fix > 1e-9
         and kapazitaet_original > 1e-9
     ):
-        invest_kosten_kwh = investitionskosten_fix / kapazitaet_original
+        invest_kosten_kwh_fallback = investitionskosten_fix / kapazitaet_original
         capex_original = float(investitionskosten_fix)
         print(
             f"  HINWEIS: Investitionskosten sind im Input-Excel als fixer Totalbetrag "
             f"angegeben (Parameter!C41 = {investitionskosten_fix:,.0f} CHF) statt als "
             f"CHF/kWh-Ansatz. Fuer den Sweep wird daraus ein effektiver Satz von "
-            f"{invest_kosten_kwh:,.2f} CHF/kWh hergeleitet ({investitionskosten_fix:,.0f} CHF / "
+            f"{invest_kosten_kwh_fallback:,.2f} CHF/kWh hergeleitet ({investitionskosten_fix:,.0f} CHF / "
             f"{kapazitaet_original:,.0f} kWh Original-Kapazitaet) und je Rasterpunkt neu skaliert."
         )
     else:
-        invest_kosten_kwh = params_original["invest_kosten_kwh"]
-        capex_original = kapazitaet_original * invest_kosten_kwh
+        invest_kosten_kwh_fallback = params_original["invest_kosten_kwh"]
+        capex_original = kapazitaet_original * invest_kosten_kwh_fallback
+
+    # NEU (Beat, 24.9.2026: "batteriekosten anpassen, fuer 0.25 C 400CHF/kWh,
+    # 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh") -- fuer JEDE im Sweep
+    # verwendete C-Rate wird hier EINMAL der passende CHF/kWh-Preis aufgeloest
+    # (aus INVEST_KOSTEN_KWH_JE_C_RATE, sonst Fallback auf den Excel-/
+    # C41-Wert oben, mit Warnung). Wird unten pro Rasterpunkt weitergegeben,
+    # statt eines einzigen, fuer alle C-Raten gleichen Preises.
+    invest_kosten_kwh_je_c_rate = {}
+    for c in C_RATEN:
+        if c in INVEST_KOSTEN_KWH_JE_C_RATE:
+            invest_kosten_kwh_je_c_rate[c] = INVEST_KOSTEN_KWH_JE_C_RATE[c]
+        else:
+            print(f"  HINWEIS: kein Preis in INVEST_KOSTEN_KWH_JE_C_RATE fuer C-Rate {c} "
+                  f"hinterlegt -- verwende Fallback {invest_kosten_kwh_fallback:,.2f} CHF/kWh.")
+            invest_kosten_kwh_je_c_rate[c] = invest_kosten_kwh_fallback
+    print(f"  Batteriekosten je C-Rate: " + ", ".join(
+        f"{c:g}C = {invest_kosten_kwh_je_c_rate[c]:,.0f} CHF/kWh" for c in C_RATEN
+    ))
 
     if UNTERHALT_PROPORTIONAL_SKALIEREN and capex_original > 1e-9:
         unterhalt_pct_von_capex = params_original["unterhalt_kosten"] / capex_original
@@ -503,16 +616,8 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
             f"fuer alle Rasterpunkte (UNTERHALT_PROPORTIONAL_SKALIEREN=False)."
         )
 
-    rasterpunkte = [(kap, c) for kap in kapazitaeten for c in C_RATEN]
-    parallel_workers = max(1, min(parallel_workers, len(rasterpunkte)))
-    print(
-        f"\n{len(rasterpunkte)} Rasterpunkte ({len(kapazitaeten)} Kapazitaeten x "
-        f"{len(C_RATEN)} C-Raten) -- jeder ist ein vollstaendiger oemof.solph-Solve, "
-        f"das kann eine Weile dauern."
-    )
-
-    def _ergebnis_zeile_drucken(nr: int, kap: float, c_rate: float, zeile: dict) -> None:
-        praefix = f"[{nr}/{len(rasterpunkte)}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate}"
+    def _ergebnis_zeile_drucken(nr: int, gesamt: int, kap: float, c_rate: float, zeile: dict) -> None:
+        praefix = f"[{nr}/{gesamt}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate}"
         if zeile["fehler"]:
             print(f"{praefix}: FEHLER: {zeile['fehler']}")
         else:
@@ -525,49 +630,133 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
                 f"Kapitalverzinsung {kv_txt}"
             )
 
-    zeilen = []
-    if parallel_workers <= 1:
-        # Unveraendertes, sequenzielles Verhalten (z.B. bei --parallel 1, oder
-        # wenn nur 1 Rasterpunkt existiert) -- einfacher zu debuggen, da die
-        # Konsolenausgabe strikt in Raster-Reihenfolge erscheint.
-        for i, (kap, c_rate) in enumerate(rasterpunkte, start=1):
-            print(f"[{i}/{len(rasterpunkte)}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate} "
-                  f"(Leistung={c_rate * kap:,.0f} kW) ...")
-            zeile = _kombination_rechnen(
-                input_lp_path, kap, c_rate, solver, invest_kosten_kwh, unterhalt_pct_von_capex,
-                params_original=params_original, zeitreihen_original=zeitreihen_original,
+    def _punkte_rechnen(punkte: list[tuple[float, float]]) -> list[dict]:
+        """Rechnet eine Liste von (Kapazitaet, C-Rate)-Rasterpunkten durch --
+        sequenziell oder parallel (ProcessPoolExecutor), je nach dem an
+        sweep() uebergebenen `parallel_workers`. Ausgelagert aus dem
+        Hauptkoerper von sweep(), damit sowohl das urspruengliche Raster als
+        auch spaeter automatisch angehaengte Erweiterungsrunden (siehe
+        KAPAZITAETS_AUTO_ERWEITERN) dieselbe Sequenziell-/Parallel-Logik
+        verwenden -- jeder Aufruf bestimmt die Worker-Zahl neu anhand der
+        Anzahl UEBERGEBENER Punkte (z.B. nur 3 bei einer Erweiterungsrunde mit
+        einer einzelnen neuen Kapazitaetsstufe x 3 C-Raten)."""
+        gesamt = len(punkte)
+        workers = max(1, min(parallel_workers, gesamt))
+        ergebnisse = []
+        if workers <= 1:
+            # Unveraendertes, sequenzielles Verhalten (z.B. bei --parallel 1,
+            # oder wenn nur 1 Rasterpunkt existiert) -- einfacher zu
+            # debuggen, da die Konsolenausgabe strikt in Raster-Reihenfolge
+            # erscheint.
+            for i, (kap, c_rate) in enumerate(punkte, start=1):
+                print(f"[{i}/{gesamt}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate} "
+                      f"(Leistung={c_rate * kap:,.0f} kW, "
+                      f"{invest_kosten_kwh_je_c_rate[c_rate]:,.0f} CHF/kWh) ...")
+                zeile = _kombination_rechnen(
+                    input_lp_path, kap, c_rate, solver, invest_kosten_kwh_je_c_rate[c_rate],
+                    unterhalt_pct_von_capex,
+                    params_original=params_original, zeitreihen_original=zeitreihen_original,
+                )
+                _ergebnis_zeile_drucken(i, gesamt, kap, c_rate, zeile)
+                ergebnisse.append(zeile)
+        else:
+            print(f"  Rechne mit {workers} parallelen Prozessen "
+                  f"(einer je CPU-Kern, minus 1) -- Reihenfolge der Meldungen unten "
+                  f"entspricht der Fertigstellung, nicht der Raster-Reihenfolge.\n")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+                future_zu_punkt = {
+                    pool.submit(
+                        _kombination_rechnen, input_lp_path, kap, c_rate, solver,
+                        invest_kosten_kwh_je_c_rate[c_rate], unterhalt_pct_von_capex,
+                        params_original, zeitreihen_original,
+                    ): (kap, c_rate)
+                    for kap, c_rate in punkte
+                }
+                for nr, future in enumerate(concurrent.futures.as_completed(future_zu_punkt), start=1):
+                    kap, c_rate = future_zu_punkt[future]
+                    try:
+                        zeile = future.result()
+                    except Exception as exc:  # noqa: BLE001 -- _kombination_rechnen faengt normalerweise
+                        # selbst schon ab; dieser Fallback greift nur bei einem
+                        # unerwarteten Absturz DES WORKER-PROZESSES selbst (z.B.
+                        # Speicherfehler) -- auch dann soll der restliche Sweep
+                        # weiterlaufen statt komplett abzubrechen.
+                        zeile = {
+                            "kapazitaet_kwh": kap, "c_rate": c_rate,
+                            "leistung_kw": round(c_rate * kap, 3),
+                            "fehler": f"{type(exc).__name__}: {exc}",
+                        }
+                    _ergebnis_zeile_drucken(nr, gesamt, kap, c_rate, zeile)
+                    ergebnisse.append(zeile)
+        return ergebnisse
+
+    rasterpunkte = [(kap, c) for kap in kapazitaeten for c in C_RATEN]
+    print(
+        f"\n{len(rasterpunkte)} Rasterpunkte ({len(kapazitaeten)} Kapazitaeten x "
+        f"{len(C_RATEN)} C-Raten) -- jeder ist ein vollstaendiger oemof.solph-Solve, "
+        f"das kann eine Weile dauern."
+    )
+    zeilen = _punkte_rechnen(rasterpunkte)
+
+    # NEU (Beat, 24.9.2026: "bei allen Runs die ich gemacht habe war C=1 und
+    # die groesste Batterie-Konfiguration die beste Wahl ... kann es sein
+    # dass das Autosizing auf zu kleine Batterien geht?") -- siehe
+    # KAPAZITAETS_AUTO_ERWEITERN oben: wenn das bisher beste Ergebnis bei der
+    # GROESSTEN getesteten Kapazitaet liegt, war das Raster vermutlich zu
+    # schmal (Gewinnkurve am oberen Rand noch steigend) -- automatisch eine
+    # weitere, groessere Kapazitaetsstufe anhaengen und neu rechnen, bis ein
+    # echtes inneres Maximum gefunden wird oder das Sicherheitslimit erreicht
+    # ist.
+    if KAPAZITAETS_AUTO_ERWEITERN and basis_kwh > 1e-6:
+        erweiterungsrunde = 0
+        while erweiterungsrunde < KAPAZITAETS_MAX_ERWEITERUNGEN:
+            gueltige = [z for z in zeilen if z.get("fehler") is None]
+            if not gueltige:
+                break
+            beste_zeile = max(gueltige, key=lambda z: z["gewinn_verlust_chf_jahr"])
+            aktuelle_max_kapazitaet = max(kapazitaeten)
+            if beste_zeile["kapazitaet_kwh"] < aktuelle_max_kapazitaet - 1e-6:
+                # Bestes Ergebnis liegt INNERHALB des Rasters -- echtes
+                # (inneres) Maximum gefunden, keine weitere Erweiterung noetig.
+                break
+
+            aktueller_multiplikator = aktuelle_max_kapazitaet / basis_kwh
+            neuer_multiplikator = round(aktueller_multiplikator) + KAPAZITAETS_ERWEITERUNGS_SCHRITT
+            neue_kapazitaet = _rund_schoen(basis_kwh * neuer_multiplikator)
+            versuch = 0
+            while (neue_kapazitaet <= aktuelle_max_kapazitaet or neue_kapazitaet in kapazitaeten) and versuch < 5:
+                neuer_multiplikator += KAPAZITAETS_ERWEITERUNGS_SCHRITT
+                neue_kapazitaet = _rund_schoen(basis_kwh * neuer_multiplikator)
+                versuch += 1
+            if neue_kapazitaet <= aktuelle_max_kapazitaet or neue_kapazitaet in kapazitaeten:
+                print("  HINWEIS: konnte keine neue, noch nicht getestete (und "
+                      "groessere) Kapazitaetsstufe finden -- automatische "
+                      "Erweiterung wird hier abgebrochen.")
+                break
+
+            erweiterungsrunde += 1
+            print(
+                f"\n  HINWEIS: das bisher beste Ergebnis liegt bei der GROESSTEN "
+                f"getesteten Kapazitaet ({aktuelle_max_kapazitaet:,.0f} kWh) -- das "
+                f"wirtschaftliche Optimum koennte also noch groesser sein. "
+                f"Automatische Raster-Erweiterung {erweiterungsrunde}/"
+                f"{KAPAZITAETS_MAX_ERWEITERUNGEN}: teste zusaetzlich "
+                f"{neue_kapazitaet:,.0f} kWh ..."
             )
-            _ergebnis_zeile_drucken(i, kap, c_rate, zeile)
-            zeilen.append(zeile)
-    else:
-        print(f"  Rechne mit {parallel_workers} parallelen Prozessen "
-              f"(einer je CPU-Kern, minus 1) -- Reihenfolge der Meldungen unten "
-              f"entspricht der Fertigstellung, nicht der Raster-Reihenfolge.\n")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_workers) as pool:
-            future_zu_punkt = {
-                pool.submit(
-                    _kombination_rechnen, input_lp_path, kap, c_rate, solver,
-                    invest_kosten_kwh, unterhalt_pct_von_capex,
-                    params_original, zeitreihen_original,
-                ): (kap, c_rate)
-                for kap, c_rate in rasterpunkte
-            }
-            for nr, future in enumerate(concurrent.futures.as_completed(future_zu_punkt), start=1):
-                kap, c_rate = future_zu_punkt[future]
-                try:
-                    zeile = future.result()
-                except Exception as exc:  # noqa: BLE001 -- _kombination_rechnen faengt normalerweise
-                    # selbst schon ab; dieser Fallback greift nur bei einem
-                    # unerwarteten Absturz DES WORKER-PROZESSES selbst (z.B.
-                    # Speicherfehler) -- auch dann soll der restliche Sweep
-                    # weiterlaufen statt komplett abzubrechen.
-                    zeile = {
-                        "kapazitaet_kwh": kap, "c_rate": c_rate,
-                        "leistung_kw": round(c_rate * kap, 3),
-                        "fehler": f"{type(exc).__name__}: {exc}",
-                    }
-                _ergebnis_zeile_drucken(nr, kap, c_rate, zeile)
-                zeilen.append(zeile)
+            kapazitaeten = sorted(set(kapazitaeten) | {neue_kapazitaet})
+            zeilen.extend(_punkte_rechnen([(neue_kapazitaet, c) for c in C_RATEN]))
+        else:
+            print(
+                f"\n  HINWEIS: auch nach {KAPAZITAETS_MAX_ERWEITERUNGEN} "
+                f"automatischen Raster-Erweiterungen liegt das beste Ergebnis "
+                f"weiterhin bei der groessten getesteten Kapazitaet "
+                f"({max(kapazitaeten):,.0f} kWh). Das kann bedeuten, dass hier "
+                f"tatsaechlich noch groessere Batterien wirtschaftlich sinnvoll "
+                f"sind, oder dass die Gewinnkurve in diesem Szenario kein klares "
+                f"Maximum hat (z.B. sehr hohes Arbitrage-Potenzial) -- bitte "
+                f"Ergebnis pruefen bzw. bei Bedarf KAPAZITAETS_MAX_ERWEITERUNGEN "
+                f"erhoehen oder manuell noch groessere Kapazitaeten testen."
+            )
 
     return pd.DataFrame(zeilen)
 
