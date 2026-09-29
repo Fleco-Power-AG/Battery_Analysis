@@ -941,6 +941,7 @@ def _heatmap_seite(
     best_pos: tuple[int, int] | None,
     niedriger_ist_besser: bool = False,
     farbskala_cap_perzentil: float | None = None,
+    dezimalstellen: int = 0,
 ) -> None:
     """Zeichnet EINE Heatmap-Seite (Kapazitaet x C-Rate) ins PDF. `diverging`
     steuert die Farbskala: True = zweifarbig (rot/gruen) um 0 zentriert
@@ -966,6 +967,13 @@ def _heatmap_seite(
     Zellen wuerden dann fast gleich hell erscheinen). Die Zellen-Beschriftung
     zeigt immer den exakten Wert, auch wenn er ueber der Farbskalen-Kappung
     liegt -- nur die FARBE wird dann auf das Maximum der Skala geklemmt.
+
+    `dezimalstellen` (NEU, Beat 29.9.2026: "kannst du im sizing report noch
+    die Jahre mit 1er Kommastelle angeben?") -- Anzahl Nachkommastellen fuer
+    die Zellen-Beschriftung (und die Kappungs-Fussnote, siehe oben). Default
+    0 (wie bisher, z.B. CHF/Jahr, %); die Amortisationsdauer-Seite nutzt 1,
+    da ganze Jahre bei kurzen Amortisationsdauern (z.B. "0 Jahre" statt "0.3
+    Jahre") zu grob waeren, um Rasterpunkte sinnvoll zu vergleichen.
 
     NEU (Beat, 22.9.2026, zweite Korrektur): wieder Kapazitaet als Zeile
     (jetzt automatisch aus dem PV-/Lastprofil, siehe baue_raster()), C-Rate
@@ -1017,7 +1025,7 @@ def _heatmap_seite(
             if not np.isfinite(wert):
                 text = "n/a" if not np.isfinite(leistung) else f"n/a\n({leistung:,.0f} kW)"
             else:
-                text = f"{wert:,.0f}{einheit}\n({leistung:,.0f} kW)"
+                text = f"{wert:,.{dezimalstellen}f}{einheit}\n({leistung:,.0f} kW)"
             ax.text(
                 j, i, text, ha="center", va="center", fontsize=8, color=_TEXT,
                 bbox=dict(facecolor="white", alpha=0.65, edgecolor="none", pad=1.5),
@@ -1033,7 +1041,7 @@ def _heatmap_seite(
     if gekappt:
         fig.text(
             0.5, 0.01,
-            f"* Farbskala bei ca. {vmax:,.0f}{einheit} gekappt (einzelne Zellen liegen "
+            f"* Farbskala bei ca. {vmax:,.{dezimalstellen}f}{einheit} gekappt (einzelne Zellen liegen "
             "darueber) -- die Zahl in der Zelle ist exakt, nur die Farbe ist begrenzt.",
             ha="center", va="bottom", fontsize=7.5, color=_TEXT,
         )
@@ -1074,7 +1082,7 @@ def baue_heatmap_pdf(df: pd.DataFrame, pdf_path: str) -> None:
     with PdfPages(pdf_path) as pdf:
         _heatmap_seite(
             pdf, amort_pivot, leistung_pivot, "Amortisationsdauer", " Jahre", False, best_pos,
-            niedriger_ist_besser=True, farbskala_cap_perzentil=85.0,
+            niedriger_ist_besser=True, farbskala_cap_perzentil=85.0, dezimalstellen=1,
         )
         _heatmap_seite(pdf, gv_pivot, leistung_pivot, "Gewinn/Verlust netto", " CHF/Jahr", True, best_pos)
         _heatmap_seite(pdf, kv_pivot, leistung_pivot, "Durchschnittliche Kapitalverzinsung", "%", True, best_pos)
