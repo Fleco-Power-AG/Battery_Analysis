@@ -27,14 +27,41 @@ Ergebnis:
   - Ein Excel mit der vollen Ergebnistabelle (eine Zeile pro Rasterpunkt):
     Kapazitaet, C-Rate, Leistung, Capex, Unterhalt, Annuitaet, Degradation,
     operativer Gesamtertrag, Gewinn/Verlust netto, Kapitalverzinsung,
-    Entladeenergie -- oder ein Fehlertext, falls ein Rasterpunkt nicht loesbar
-    war (z.B. Infeasibility bei einer sehr kleinen Batterie).
-  - Ein PDF mit drei Heatmaps (Gewinn/Verlust netto, durchschnittliche
-    Kapitalverzinsung, operativer Gesamtertrag) -- Zeilen = Kapazitaet (kWh),
-    Spalten = C-Rate, jede Zelle zusaetzlich mit der resultierenden Leistung
-    (kW) beschriftet. Die Zelle mit dem hoechsten Gewinn/Verlust wird in allen
-    drei Heatmaps schwarz umrandet hervorgehoben (dieselbe Position in jeder
-    der drei Heatmaps, damit man sie direkt vergleichen kann).
+    Amortisationsdauer, Entladeenergie -- oder ein Fehlertext, falls ein
+    Rasterpunkt nicht loesbar war (z.B. Infeasibility bei einer sehr kleinen
+    Batterie).
+  - Ein PDF mit vier Heatmaps -- Zeilen = Kapazitaet (kWh), Spalten = C-Rate,
+    jede Zelle zusaetzlich mit der resultierenden Leistung (kW) beschriftet.
+    Die Zelle mit dem hoechsten Gewinn/Verlust wird in ALLEN vier Heatmaps
+    an derselben Position schwarz umrandet hervorgehoben, damit man sie
+    direkt vergleichen kann.
+
+    NEU (Beat, 29.9.2026: "der reine profit ist nicht ganz die richtige
+    hauptgroesse (sagt nichts ueber rendite aus) soll auf seite 2 / auf
+    seite 1 moechte ich die Amortisationsdauer haben, da so verschieden
+    grosse assets und investitionen verglichen werden koennen"):
+    Seitenreihenfolge seither:
+      1. Amortisationsdauer (Jahre) -- die neue Hauptgroesse auf Seite 1,
+         weil sie (anders als der absolute CHF/Jahr-Gewinn) unabhaengig von
+         der Investitionsgroesse vergleichbar ist -- eine kleine und eine
+         grosse Batterie mit unterschiedlichem Capex lassen sich so direkt
+         gegenueberstellen.
+      2. Gewinn/Verlust netto (CHF/Jahr) -- der bisherige Seite-1-Wert, jetzt
+         Seite 2 (weiterhin wichtig, sagt aber nur etwas ueber die absolute
+         Grosse des Gewinns aus, nicht ueber die Rendite/Kapitaleffizienz).
+      3. Durchschnittliche Kapitalverzinsung (%) -- unveraendert.
+      4. Operativer Gesamtertrag (CHF/Jahr) -- unveraendert.
+    Amortisationsdauer verwendet dieselbe Formel wie
+    output_create.build_rendite_kennzahlen() (capex / netto_cashflow) und
+    wird EINFARBIG dargestellt wie der operative Gesamtertrag, aber mit
+    UMGEKEHRTER Farbrichtung: kurze Amortisationsdauer (gut) = dunkelgruen,
+    lange Amortisationsdauer (schlecht) = weiss -- siehe _heatmap_seite()
+    Parameter `niedriger_ist_besser`. Die Farbskala wird zusaetzlich auf ein
+    Perzentil gekappt (siehe baue_heatmap_pdf()), da einzelne Rasterpunkte
+    mit sehr kleinem/negativem Netto-Cashflow rechnerisch eine extrem lange
+    (oder unendliche) Amortisationsdauer ergeben koennen, was sonst die
+    ganze Farbskala unbrauchbar machen wuerde -- der exakte Zahlenwert in
+    der Zelle bleibt davon unberuehrt.
 
 RASTER-BESTIMMUNG (NEU GEAENDERT 22.9.2026 -- ZWEITE KORREKTUR, Beat: "bei
 einer durchschnittlichen Last von 30 kWh hat der code Batteriegroessen von
@@ -244,6 +271,26 @@ KAPAZITAETEN_FALLBACK_KWH = [100.0, 200.0, 300.0, 500.0, 750.0, 1000.0]
 KAPAZITAETS_AUTO_ERWEITERN = True
 KAPAZITAETS_ERWEITERUNGS_SCHRITT = 1.0  # je Runde: + 1x Basis oben drauf
 KAPAZITAETS_MAX_ERWEITERUNGEN = 3
+
+# NEU (Beat, 29.9.2026: "auch sollte das sizing dann so angepasst werden
+# damit nicht nur hohe gewinne/verlust erzielt werden sondern dass wir
+# bereiche abdecken mit einer tiefen amortisationsdauer") -- die Erweiterung
+# oben (KAPAZITAETS_ERWEITERUNGS_SCHRITT) sucht ausschliesslich Richtung
+# GROESSERER Kapazitaet, getrieben vom hoechsten Gewinn/Verlust. Absoluter
+# Gewinn steigt aber typischerweise mit der Batteriegroesse noch lange
+# weiter, auch wenn die Amortisationsdauer (Rendite pro investiertem CHF)
+# laengst wieder schlechter wird -- ohne Gegenmassnahme wuerde der Sweep also
+# nie in Richtung einer kleineren, aber kapitaleffizienteren Batterie
+# erweitern. Deshalb zusaetzlich eine ANALOGE Erweiterung nach UNTEN: liegt
+# die guenstigste (kuerzeste) Amortisationsdauer aller bisher getesteten
+# Rasterpunkte bei der KLEINSTEN getesteten Kapazitaet, wird automatisch eine
+# noch kleinere Stufe angehaengt und neu gerechnet -- symmetrisch zur
+# Erweiterung nach oben, nur mit kleinerem Schritt (0.5x/1.0x/1.5x/... der
+# Basis liegen naeher beieinander als die absoluten kWh-Werte bei grossen
+# Kapazitaeten) und einer unteren Multiplikator-Grenze, damit nicht bis in
+# technisch unsinnig kleine Batteriegroessen "hinunter-erweitert" wird.
+KAPAZITAETS_ERWEITERUNGS_SCHRITT_UNTEN = 0.25  # je Runde: -0.25x Basis darunter
+KAPAZITAETS_MULTIPLIKATOR_MIN = 0.1  # nie kleiner als 10% der Basis testen
 
 # NEU (Beat, 24.9.2026: "jetzt muessen wir noch die batteriekosten anpassen,
 # fuer 0.25 C 400CHF/kWh, 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh") --
@@ -502,6 +549,14 @@ def _kombination_rechnen(
     gewinn_verlust = total_operativ - kk["annuitaet"] - kk["unterhalt"] - degradation_jahr
     netto_cashflow = total_operativ - kk["unterhalt"] - degradation_jahr
     kapitalverzinsung_pct = (netto_cashflow / kk["capex"] * 100.0) if kk["capex"] > 1e-9 else None
+    # NEU (Beat, 29.9.2026: Amortisationsdauer auf Seite 1 der Heatmap-PDF,
+    # "da so verschieden grosse assets und investitionen verglichen werden
+    # koennen") -- identische Formel wie
+    # output_create.build_rendite_kennzahlen() (capex / netto_cashflow).
+    # None, wenn der Netto-Cashflow nicht positiv ist (amortisiert sich nie).
+    amortisationsdauer_jahre = (
+        kk["capex"] / netto_cashflow if netto_cashflow > 1e-9 else None
+    )
 
     zeile.update({
         "capex_chf": kk["capex"],
@@ -511,6 +566,7 @@ def _kombination_rechnen(
         "total_operativ_chf_jahr": total_operativ,
         "gewinn_verlust_chf_jahr": gewinn_verlust,
         "kapitalverzinsung_pct": kapitalverzinsung_pct,
+        "amortisationsdauer_jahre": amortisationsdauer_jahre,
         "entladeenergie_kwh_jahr": entladeenergie_kwh,
     })
     return zeile
@@ -625,9 +681,13 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
                 f"{zeile['kapitalverzinsung_pct']:.1f}%"
                 if zeile["kapitalverzinsung_pct"] is not None else "n/a"
             )
+            amort_txt = (
+                f"{zeile['amortisationsdauer_jahre']:.1f} Jahre"
+                if zeile.get("amortisationsdauer_jahre") is not None else "n/a"
+            )
             print(
-                f"{praefix}: Gewinn/Verlust {zeile['gewinn_verlust_chf_jahr']:,.0f} CHF/Jahr, "
-                f"Kapitalverzinsung {kv_txt}"
+                f"{praefix}: Amortisationsdauer {amort_txt}, Gewinn/Verlust "
+                f"{zeile['gewinn_verlust_chf_jahr']:,.0f} CHF/Jahr, Kapitalverzinsung {kv_txt}"
             )
 
     def _punkte_rechnen(punkte: list[tuple[float, float]]) -> list[dict]:
@@ -758,6 +818,90 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
                 f"erhoehen oder manuell noch groessere Kapazitaeten testen."
             )
 
+    # NEU (Beat, 29.9.2026: "auch sollte das sizing dann so angepasst werden
+    # damit nicht nur hohe gewinne/verlust erzielt werden sondern dass wir
+    # bereiche abdecken mit einer tiefen amortisationsdauer") -- analog zur
+    # Erweiterung nach oben (getrieben vom hoechsten Gewinn/Verlust), hier
+    # eine Erweiterung nach UNTEN, getrieben von der kuerzesten
+    # Amortisationsdauer: liegt die guenstigste Amortisationsdauer bei der
+    # KLEINSTEN getesteten Kapazitaet, koennte eine noch kleinere Batterie
+    # kapitaleffizienter sein (kuerzere Amortisation), auch wenn ihr
+    # absoluter Gewinn/Verlust tiefer liegt als bei einer groesseren Anlage --
+    # deshalb eigenes Kriterium, unabhaengig von der Gewinn/Verlust-Erweiterung
+    # oben.
+    if KAPAZITAETS_AUTO_ERWEITERN and basis_kwh > 1e-6:
+        erweiterungsrunde_unten = 0
+        while erweiterungsrunde_unten < KAPAZITAETS_MAX_ERWEITERUNGEN:
+            gueltige_amort = [
+                z for z in zeilen
+                if z.get("fehler") is None and z.get("amortisationsdauer_jahre") is not None
+            ]
+            if not gueltige_amort:
+                break
+            beste_amort_zeile = min(gueltige_amort, key=lambda z: z["amortisationsdauer_jahre"])
+            aktuelle_min_kapazitaet = min(kapazitaeten)
+            if beste_amort_zeile["kapazitaet_kwh"] > aktuelle_min_kapazitaet + 1e-6:
+                # Guenstigste Amortisationsdauer liegt bereits INNERHALB des
+                # Rasters -- kein Bedarf, noch kleinere Kapazitaeten zu testen.
+                break
+
+            aktueller_multiplikator_unten = aktuelle_min_kapazitaet / basis_kwh
+            neuer_multiplikator_unten = aktueller_multiplikator_unten - KAPAZITAETS_ERWEITERUNGS_SCHRITT_UNTEN
+            neue_kapazitaet_unten = (
+                _rund_schoen(basis_kwh * neuer_multiplikator_unten)
+                if neuer_multiplikator_unten >= KAPAZITAETS_MULTIPLIKATOR_MIN else None
+            )
+            versuch = 0
+            while (
+                neue_kapazitaet_unten is not None
+                and (neue_kapazitaet_unten >= aktuelle_min_kapazitaet or neue_kapazitaet_unten in kapazitaeten)
+                and versuch < 5
+            ):
+                neuer_multiplikator_unten -= KAPAZITAETS_ERWEITERUNGS_SCHRITT_UNTEN
+                neue_kapazitaet_unten = (
+                    _rund_schoen(basis_kwh * neuer_multiplikator_unten)
+                    if neuer_multiplikator_unten >= KAPAZITAETS_MULTIPLIKATOR_MIN else None
+                )
+                versuch += 1
+            if (
+                neue_kapazitaet_unten is None
+                or neue_kapazitaet_unten >= aktuelle_min_kapazitaet
+                or neue_kapazitaet_unten in kapazitaeten
+            ):
+                print(
+                    "  HINWEIS: konnte keine neue, noch nicht getestete (und "
+                    "kleinere) Kapazitaetsstufe finden, oder die untere "
+                    f"Multiplikator-Grenze ({KAPAZITAETS_MULTIPLIKATOR_MIN:g}x Basis) "
+                    "ist erreicht -- automatische Erweiterung nach unten wird hier "
+                    "abgebrochen."
+                )
+                break
+
+            erweiterungsrunde_unten += 1
+            print(
+                f"\n  HINWEIS: die guenstigste Amortisationsdauer liegt bei der "
+                f"KLEINSTEN getesteten Kapazitaet ({aktuelle_min_kapazitaet:,.0f} kWh) -- "
+                f"eine kleinere Batterie koennte also kapitaleffizienter sein "
+                f"(kuerzere Amortisation), auch wenn ihr absoluter Gewinn tiefer "
+                f"liegt. Automatische Raster-Erweiterung nach unten "
+                f"{erweiterungsrunde_unten}/{KAPAZITAETS_MAX_ERWEITERUNGEN}: teste "
+                f"zusaetzlich {neue_kapazitaet_unten:,.0f} kWh ..."
+            )
+            kapazitaeten = sorted(set(kapazitaeten) | {neue_kapazitaet_unten})
+            zeilen.extend(_punkte_rechnen([(neue_kapazitaet_unten, c) for c in C_RATEN]))
+        else:
+            print(
+                f"\n  HINWEIS: auch nach {KAPAZITAETS_MAX_ERWEITERUNGEN} "
+                f"automatischen Raster-Erweiterungen nach unten liegt die "
+                f"guenstigste Amortisationsdauer weiterhin bei der kleinsten "
+                f"getesteten Kapazitaet ({min(kapazitaeten):,.0f} kWh). Das kann "
+                f"bedeuten, dass hier tatsaechlich noch kleinere Batterien "
+                f"kapitaleffizienter sind (bitte pruefen bzw. bei Bedarf "
+                f"KAPAZITAETS_MAX_ERWEITERUNGEN erhoehen), oder dass die untere "
+                f"Multiplikator-Grenze ({KAPAZITAETS_MULTIPLIKATOR_MIN:g}x Basis) "
+                f"bereits erreicht war."
+            )
+
     return pd.DataFrame(zeilen)
 
 
@@ -769,7 +913,7 @@ _EXCEL_SPALTEN_REIHENFOLGE = [
     "kapazitaet_kwh", "c_rate", "leistung_kw",
     "capex_chf", "unterhalt_chf_jahr", "annuitaet_chf_jahr", "degradation_chf_jahr",
     "total_operativ_chf_jahr", "gewinn_verlust_chf_jahr", "kapitalverzinsung_pct",
-    "entladeenergie_kwh_jahr", "fehler",
+    "amortisationsdauer_jahre", "entladeenergie_kwh_jahr", "fehler",
 ]
 
 
@@ -795,6 +939,8 @@ def _heatmap_seite(
     einheit: str,
     diverging: bool,
     best_pos: tuple[int, int] | None,
+    niedriger_ist_besser: bool = False,
+    farbskala_cap_perzentil: float | None = None,
 ) -> None:
     """Zeichnet EINE Heatmap-Seite (Kapazitaet x C-Rate) ins PDF. `diverging`
     steuert die Farbskala: True = zweifarbig (rot/gruen) um 0 zentriert
@@ -802,6 +948,24 @@ def _heatmap_seite(
     False = einfarbig hell->dunkelgruen (fuer den operativen Gesamtertrag,
     der praktisch nie negativ ist -- siehe dataviz-Skill: sequentiell = eine
     Farbe, divergierend = zwei Farben + neutrale Mitte, nie ein Regenbogen).
+
+    `niedriger_ist_besser` (NEU, Beat 29.9.2026, Amortisationsdauer-Seite):
+    nur bei `diverging=False` relevant -- dreht die Farbrichtung um, sodass
+    der NIEDRIGSTE Wert (z.B. kurze Amortisationsdauer = gut) dunkelgruen
+    wird und der HOECHSTE Wert (lange Amortisationsdauer = schlecht) weiss
+    bleibt, statt wie beim operativen Gesamtertrag umgekehrt (dort ist ein
+    hoher Wert das gute Ergebnis). Ohne diese Umkehr wuerde eine lange
+    Amortisationsdauer faelschlich als "dunkelgruen = gut" erscheinen.
+
+    `farbskala_cap_perzentil` (NEU, Beat 29.9.2026): optionale Kappung der
+    Farbskala (NICHT der angezeigten Zahl) auf ein Perzentil der endlichen
+    Werte, statt auf das reine Maximum -- fuer die Amortisationsdauer
+    gedacht, wo einzelne Rasterpunkte mit sehr kleinem/negativem Netto-
+    Cashflow rechnerisch extrem lange Amortisationsdauern ergeben koennen,
+    die sonst die ganze Farbskala unbrauchbar machen wuerden (alle anderen
+    Zellen wuerden dann fast gleich hell erscheinen). Die Zellen-Beschriftung
+    zeigt immer den exakten Wert, auch wenn er ueber der Farbskalen-Kappung
+    liegt -- nur die FARBE wird dann auf das Maximum der Skala geklemmt.
 
     NEU (Beat, 22.9.2026, zweite Korrektur): wieder Kapazitaet als Zeile
     (jetzt automatisch aus dem PV-/Lastprofil, siehe baue_raster()), C-Rate
@@ -811,6 +975,7 @@ def _heatmap_seite(
     kapazitaeten = werte_pivot.index.tolist()
     c_raten = werte_pivot.columns.tolist()
     werte = werte_pivot.values.astype(float)
+    gekappt = False
 
     if diverging:
         finite = werte[np.isfinite(werte)]
@@ -820,10 +985,16 @@ def _heatmap_seite(
         cmap = mcolors.LinearSegmentedColormap.from_list("fleco_div", [_NEG, "#FFFFFF", _POS])
     else:
         finite = werte[np.isfinite(werte)]
-        vmax = float(np.max(finite)) if finite.size else 1.0
+        vmax_echt = float(np.max(finite)) if finite.size else 1.0
+        if farbskala_cap_perzentil is not None and finite.size >= 3:
+            vmax = float(np.percentile(finite, farbskala_cap_perzentil))
+            gekappt = vmax < vmax_echt - 1e-6
+        else:
+            vmax = vmax_echt
         vmax = vmax if vmax > 1e-9 else 1.0
         norm = mcolors.Normalize(vmin=0.0, vmax=vmax)
-        cmap = mcolors.LinearSegmentedColormap.from_list("fleco_seq", ["#FFFFFF", _POS])
+        farben = [_POS, "#FFFFFF"] if niedriger_ist_besser else ["#FFFFFF", _POS]
+        cmap = mcolors.LinearSegmentedColormap.from_list("fleco_seq", farben)
 
     fig, ax = plt.subplots(figsize=(9.0, 0.62 * len(kapazitaeten) + 2.4))
     masked = np.ma.masked_invalid(werte)
@@ -859,18 +1030,32 @@ def _heatmap_seite(
         )
 
     fig.colorbar(im, ax=ax, shrink=0.85, label=f"{titel} [{einheit.strip()}]" if einheit.strip() else titel)
+    if gekappt:
+        fig.text(
+            0.5, 0.01,
+            f"* Farbskala bei ca. {vmax:,.0f}{einheit} gekappt (einzelne Zellen liegen "
+            "darueber) -- die Zahl in der Zelle ist exakt, nur die Farbe ist begrenzt.",
+            ha="center", va="bottom", fontsize=7.5, color=_TEXT,
+        )
     fig.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
 
 
 def baue_heatmap_pdf(df: pd.DataFrame, pdf_path: str) -> None:
-    """Baut das PDF mit den drei Heatmaps (Gewinn/Verlust, Kapitalverzinsung,
-    operativer Gesamtertrag) aus der Sweep-Ergebnistabelle. Rasterpunkte mit
-    `fehler` gesetzt erscheinen automatisch als 'n/a'-Zelle (fehlender Wert
-    im Pivot -> NaN -> maskiert/beschriftet, siehe _heatmap_seite()). Die
-    Zelle mit dem hoechsten Gewinn/Verlust wird in ALLEN DREI Heatmaps an
-    derselben Position schwarz umrandet.
+    """Baut das PDF mit den vier Heatmaps aus der Sweep-Ergebnistabelle.
+    Rasterpunkte mit `fehler` gesetzt erscheinen automatisch als 'n/a'-Zelle
+    (fehlender Wert im Pivot -> NaN -> maskiert/beschriftet, siehe
+    _heatmap_seite()). Die Zelle mit dem hoechsten Gewinn/Verlust wird in
+    ALLEN VIER Heatmaps an derselben Position schwarz umrandet.
+
+    NEU (Beat, 29.9.2026: "der reine profit ist nicht ganz die richtige
+    hauptgroesse (sagt nichts ueber rendite aus) soll auf seite 2 / auf
+    seite 1 moechte ich die Amortisationsdauer haben, da so verschieden
+    grosse assets und investitionen verglichen werden koennen") --
+    Seitenreihenfolge: 1. Amortisationsdauer, 2. Gewinn/Verlust netto (bisher
+    Seite 1), 3. Kapitalverzinsung, 4. Operativer Gesamtertrag -- siehe
+    Modulkopf fuer die vollstaendige Begruendung.
 
     NEU (Beat, 22.9.2026, zweite Korrektur): Pivot-Index ist wieder
     Kapazitaet (kWh), nicht mehr Leistung (kW) -- siehe _heatmap_seite()."""
@@ -878,6 +1063,7 @@ def baue_heatmap_pdf(df: pd.DataFrame, pdf_path: str) -> None:
     gv_pivot = df.pivot(index="kapazitaet_kwh", columns="c_rate", values="gewinn_verlust_chf_jahr")
     kv_pivot = df.pivot(index="kapazitaet_kwh", columns="c_rate", values="kapitalverzinsung_pct")
     op_pivot = df.pivot(index="kapazitaet_kwh", columns="c_rate", values="total_operativ_chf_jahr")
+    amort_pivot = df.pivot(index="kapazitaet_kwh", columns="c_rate", values="amortisationsdauer_jahre")
 
     try:
         best_pos = tuple(int(x) for x in np.unravel_index(np.nanargmax(gv_pivot.values), gv_pivot.shape))
@@ -886,6 +1072,10 @@ def baue_heatmap_pdf(df: pd.DataFrame, pdf_path: str) -> None:
         print("  HINWEIS: kein einziger Rasterpunkt erfolgreich geloest -- keine 'beste' Zelle markierbar.")
 
     with PdfPages(pdf_path) as pdf:
+        _heatmap_seite(
+            pdf, amort_pivot, leistung_pivot, "Amortisationsdauer", " Jahre", False, best_pos,
+            niedriger_ist_besser=True, farbskala_cap_perzentil=85.0,
+        )
         _heatmap_seite(pdf, gv_pivot, leistung_pivot, "Gewinn/Verlust netto", " CHF/Jahr", True, best_pos)
         _heatmap_seite(pdf, kv_pivot, leistung_pivot, "Durchschnittliche Kapitalverzinsung", "%", True, best_pos)
         _heatmap_seite(pdf, op_pivot, leistung_pivot, "Operativer Gesamtertrag", " CHF/Jahr", False, best_pos)
