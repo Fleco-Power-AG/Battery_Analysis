@@ -1745,6 +1745,12 @@ _SRL_KURZ_LABELS = {
 # der Unterschied Kunde/Markt ist fuer die knappe Zusammenfassung nicht
 # relevant, steht aber unveraendert im Detail auf Seite 0.
 _SRL_PREISSCHEMA_KURZ_LABELS = {
+    # NEU (SRL-Pricing-Umbau 30.10.2026): Parameter!C50 ist nur noch
+    # "Markt" oder "Kunde" -- Vergangenheit = Marktpreise (CSV), Zukunft =
+    # Forecast, "Kunde" = Marktpreis x Kundenfaktor.
+    "markt": "Marktpreise",
+    "kunde": "Kundenpreise",
+    # Alt-Codes (aeltere input_lp-Dateien) -- bleiben lesbar:
     "forecast_2027_kunde": "Vorhersage 2027",
     "forecast_2027_markt": "Vorhersage 2027",
     "backcast_2025_kunde": "Marktpreise 2025",
@@ -1987,6 +1993,11 @@ def build_input_summary_rows(
         # anzeigen. NEU (Beats Rueckmeldung): keine Ø-Preise mehr -- nur
         # Modus + Preisschema, die Ø-Preis-Zeile wurde entfernt.
         rows.append({"label": "Preisschema", "value": _fmt_param(params.get("srl_preisschema"), na="unbekannt")})
+        # NEU (SRL-Pricing-Umbau 30.10.2026): Herkunft der Preise (CSV-Markt-
+        # preise/Forecast-Anteil, Kundenfaktor, Energie-Aufschlag) -- von
+        # input_prep.py in Parameter!E50 vermerkt; fehlt bei alten Dateien.
+        if params.get("srl_preisquelle"):
+            rows.append({"label": "SRL-Preisquelle", "value": str(params["srl_preisquelle"])})
 
     return rows
 

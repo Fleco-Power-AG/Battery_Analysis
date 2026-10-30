@@ -1,0 +1,15 @@
+{
+  "kunde": {
+    "firma": "Firma/Auftraggeber",
+    "kontaktperson": "Vorname Name",
+    "adresse": ["Strasse Nr.", "PLZ Ort"]
+  },
+  "projekt": {
+    "bezeichnung": "Projektname",
+    "standort": "Strasse Nr., PLZ Ort"
+  },
+  "bericht_datum": "TT.MM.JJJJ",
+  "kontakt": {
+    "name": "Beat Faas"
+  }
+}

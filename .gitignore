@@ -1,22 +1,24 @@
-# Python
+# ============================================================================
+#  .gitignore  -  Hauptordner "17 Batterieanalyse"
+#
+#  Alles kommt aufs Repo AUSSER den Inhalten von "01 Durchgefuehrte Analysen"
+#  (Kundenprojekte). Der Ordner selbst bleibt ueber .gitkeep erhalten.
+# ============================================================================
+
+# Kundenprojekte (Platzhalter "01 *" vermeidet den Umlaut im Ordnernamen)
+/01 */*
+!/01 */.gitkeep
+
+# Technischer Ballast
 __pycache__/
 *.pyc
-
-# VS Code
 .vscode/
-
-# Python Environments
+~$*
 venv/
 .venv/
-env/
+*.log
 
-# Excel Temporärdateien
-~$*.xlsx
-
-# Output komplett ignorieren
-Output/
-
-# Excel- und PDF-Dateien nur im Hauptordner nicht synchronisieren
-# (führendes "/" = nur direkt hier, nicht in Unterordnern wie Vorlagen/, Input/, Output/, Code/, Dokumente/)
-/*.xlsx
-/*.pdf
+# Probelaeufe im Code-Ordner
+/05 Code/*.xlsx
+/05 Code/*.pdf
+/05 Code/*_QA.txt

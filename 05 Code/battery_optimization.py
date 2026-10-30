@@ -346,6 +346,16 @@ def read_inputs(path: str = INPUT_PATH):
         # die in Zeitreihen!G/H bereits gebackenen SRL-Preise verwendet, aber
         # nie als eigener Wert mitgelesen/angezeigt.
         "srl_preisschema": wsP["C50"].value,
+        # NEU (SRL-Pricing-Umbau 30.10.2026): C50 ist jetzt nur noch "Markt"
+        # oder "Kunde". input_prep.py berechnet die SRL-Preise (Zeitreihen!G/H)
+        # aus den CSV-Marktpreisen bzw. dem Forecast und vermerkt Quelle/Anteile
+        # in Parameter!E50 (Transparenz-Notiz, analog swissix_quelle in E5);
+        # der Kundenfaktor steht in C52 (nur bei "Kunde" relevant).
+        "srl_preisquelle": wsP["E50"].value,
+        "srl_kundenfaktor": (
+            wsP["C52"].value
+            if "kundenfaktor" in str(wsP["A52"].value or "").lower() else None
+        ),
         "last_vorhanden": wsP["C54"].value,  # neu: "Ja" -> Zeitreihen!I, "Nein" -> keine Last
     }
 

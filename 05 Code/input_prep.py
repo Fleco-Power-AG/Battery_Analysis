@@ -10,8 +10,8 @@ Was das Skript macht (siehe Funktionen unten):
        a) aus einer lokalen CSV-Datei laden (Beats eigene, manuell gepflegte
           Datei mit historischen + kuenftigen Day-Ahead-Preisen in EUR/MWh,
           echte Europe/Zurich-Ortszeit mit Sommerzeit-Wechsel), Pfad:
-          <Inputs-Ordner>/Input/ch_dayahead_2020_26_15min.csv (siehe
-          SWISSIX_CSV_SUBDIR/SWISSIX_CSV_FILENAME) -- deckt die Datei den
+          <03 Stammdaten>/ch_dayahead_2020_26_15min.csv (siehe
+          find_stammdaten_dir()/SWISSIX_CSV_FILENAME) -- deckt die Datei den
           benoetigten Zeitraum nicht (vollstaendig) ab, wird nur die Luecke
           ueber b) gefuellt.
        b) fehlende Zeitschritte (oder die ganze Reihe, falls die Datei fehlt/
@@ -36,9 +36,13 @@ Was das Skript macht (siehe Funktionen unten):
      vermarktet werden (z.B. PV per RMP_Floor, Batterie ohne Verguetung).
   3. PV-Produktionsprofil (Zeitreihen!E, "CH_PV_normiert_1kWp") optional via PVGIS
      laden -- braucht Standort/Ausrichtung, siehe fetch_pv_reference_profile().
-  4. SRL-Preise (Zeitreihen!G/H) sind im Original-Excel bereits per Array-Formel
-     aus Hilfen_Listen berechnet -- werden hier als fixe Werte "gebacken", damit
-     die Endversion ohne Hilfsblatt-Referenzen auskommt.
+  4. SRL-Preise (Zeitreihen!G/H, CHF/kWh) werden hier berechnet (NEU, vorher
+     Excel-Formeln): Parameter!C50 = "Markt" oder "Kunde". Vergangenheit =
+     Tagespreis aus out_secondary_up.csv (POS) / out_secondary_down.csv (NEG)
+     im Ordner "03 Stammdaten" (Spalte S, CHF/MW/h / 1000), Zukunft = monatlicher
+     Forecast aus Hilfen_Listen. "Kunde" = Marktpreis x Kundenfaktor
+     (Parameter!C52); in beiden Faellen x (1 + SRL-Energie-Aufschlag, C51).
+     Quelle/Anteile werden in Parameter!E50 vermerkt (-> Report).
   5. Speichert alles unter input_lp.xlsx (Parameter/Hilfen_Listen unveraendert,
      Zeitreihen ergaenzt).
 
@@ -109,27 +113,27 @@ ENTSOE_CH_DOMAIN = "10YCH-SWISSGRIDZ"
 
 FX_API_URL = "https://api.frankfurter.app"  # kostenlos, kein Key noetig
 
-# NEU: lokale SwissIX-Datei (Beats Wunsch) -- liegt in einem "Input"-
-# Unterordner NEBEN der Inputs.xlsx (analog zum bereits bestehenden "Output"-
-# Unterordner, siehe run_battery_analysis.py), also z.B.
-#   <Inputs-Ordner>/Input/ch_dayahead_2020_26_15min.csv
-# Im Unterschied zu "Output" ist dieser Ordner/diese Datei OPTIONAL -- fehlt
-# sie, wird das nicht als Fehler behandelt, sondern loest einfach den
-# naechsten Fallback aus (Website, siehe resolve_swissix()).
-SWISSIX_CSV_SUBDIR = "Input"
+# STAMMDATEN (Beat, 30.10.2026: "alle Dateien in Stammdaten sollen von diesem
+# Pfad gezogen werden und nicht vom lokalen Projektordner"): SwissIX-CSV,
+# Solar_RMP.xlsx und die SRL-Marktpreise (out_secondary_*.csv) liegen EINMAL
+# zentral im Ordner "03 Stammdaten" und werden ausschliesslich ueber
+# find_stammdaten_dir() gefunden. Der fruehere projektlokale Unterordner
+# "<Inputs-Ordner>/Input" wird bewusst NICHT mehr durchsucht, damit nie eine
+# veraltete lokale Kopie gezogen wird.
+#
+# SwissIX-Datei ist OPTIONAL -- fehlt sie oder deckt sie den Zeitraum nicht ab,
+# loest das den naechsten Fallback aus (Website, siehe resolve_swissix()).
 SWISSIX_CSV_FILENAME = "ch_dayahead_2020_26_15min.csv"
 
 # NEU (Beats Wunsch: RMP-Rueckliefertarif fuer PV/Batterie): RMP-Werte
-# (CHF/kWh) je Jahr liegen in einer separaten Datei, analog zur SwissIX-CSV
-# im selben "Input"-Unterordner, z.B.
-#   <Inputs-Ordner>/Input/Solar_RMP.xlsx
+# (CHF/kWh) je Jahr liegen in einer separaten Datei in "03 Stammdaten":
+#   <03 Stammdaten>/Solar_RMP.xlsx
 # NEU (Beats Wunsch 18.9.2026: "fuer RMP und RMP mit Floor nicht den
 # monatlichen RMP nehmen sondern den Quartalsweise, ich habe den im File
 # ergaenzt"): Solar_RMP.xlsx enthaelt seither zusaetzlich zu den (weiterhin
 # vorhandenen, aber nicht mehr gelesenen) Monatszeilen (1-12) auch vier
 # Quartalszeilen ("Q1".."Q4", Q1=Jan-Maerz, Q2=Apr-Jun, Q3=Jul-Sep,
 # Q4=Okt-Dez) -- siehe load_rmp_lookup()/build_rmp_series().
-SOLAR_RMP_SUBDIR = "Input"
 SOLAR_RMP_FILENAME = "Solar_RMP.xlsx"
 
 # Das Excel zaehlt durchgehend 365*96 = 35040 Viertelstunden pro Jahr, ohne
@@ -811,7 +815,7 @@ def build_tariffs(
             raise ValueError(
                 "Tarifschema=SPOT braucht die SwissIX-Zeitreihe (Spalte B) -- "
                 "diese ist weder aus der lokalen CSV-Datei "
-                f"(<Inputs-Ordner>/{SWISSIX_CSV_SUBDIR}/{SWISSIX_CSV_FILENAME}) "
+                f"(<03 Stammdaten>/{SWISSIX_CSV_FILENAME}) "
                 "noch automatisch von der ENTSO-E-Website (Fetch "
                 "fehlgeschlagen oder uebersprungen, siehe Warnung weiter oben) "
                 "noch von Hand in Zeitreihen!B vorhanden. Entweder (a) die "
@@ -1004,6 +1008,16 @@ def read_params(ws_param) -> dict:
     _check_label(ws_param, 22, "Fixtarif")
     _check_label(ws_param, 25, "DC Leistung")
     _check_label(ws_param, 26, "Produktions-Input")
+    _check_label(ws_param, 49, "SRL-Leistung")
+    _check_label(ws_param, 50, "SRL-Leistung-Preise")
+    _check_label(ws_param, 51, "SRL-Energie")
+
+    # NEU: Kundenfaktor (Zeile 52) -- fehlt bei alten Inputfiles, dann Fallback
+    # auf Hilfen_Listen!N1 / 0.5 (siehe main()).
+    a52 = ws_param["A52"].value
+    kundenfaktor = None
+    if a52 is not None and "kundenfaktor" in str(a52).lower():
+        kundenfaktor = ws_param["C52"].value
 
     return {
         "beginn": ws_param["C2"].value,
@@ -1027,7 +1041,249 @@ def read_params(ws_param) -> dict:
         "rueckliefer_batterie_fixtarif": ws_param["C22"].value,
         "dc_leistung": ws_param["C25"].value,
         "produktions_input": ws_param["C26"].value,
+        "srl_teilnahme": ws_param["C49"].value,
+        "srl_preisschema": ws_param["C50"].value,
+        "srl_energie_aufschlag": ws_param["C51"].value,
+        "srl_kundenfaktor": kundenfaktor,
     }
+
+
+# --------------------------------------------------------------------------
+# 4b. SRL-Preise (NEU: Markt/Kunde, Marktpreise aus CSV, Forecast fuer Zukunft)
+# --------------------------------------------------------------------------
+#
+# Beats Umbau (30.10.2026): bisher gab es im Parameter-Sheet vier Varianten
+# (Backcast_2025_Kunde/Markt, Forecast_2027_Kunde/Markt), die als ganzes Jahr
+# per Excel-Formel in Zeitreihen!G/H gezogen wurden. NEU gibt es nur noch
+# "Markt" oder "Kunde" (Parameter!C50) -- der Zeitbereich entscheidet selbst,
+# woher der Preis kommt:
+#   * Vergangenheit (Tag <= letzter Tag in den CSV-Dateien): echter
+#     Marktpreis je Tag aus out_secondary_up.csv (POS) / out_secondary_down.csv
+#     (NEG), Spalte S ("overall_avg_price", CHF/MW/h -> /1000 = CHF/kWh).
+#   * Zukunft (Tage nach der CSV): monatlicher Forecast (Markt) aus
+#     Hilfen_Listen (Spalte J, Zeilen 4-15 POS / 19-30 NEG).
+#   * "Markt" nimmt diese Preise 1:1, "Kunde" multipliziert sie mit dem
+#     Kundenfaktor (Parameter!C52, bisher Hilfen_Listen!N1).
+#   * Danach wie bisher: x (1 + SRL-Energie-Aufschlag, Parameter!C51).
+
+SRL_CSV_UP_FILENAME = "out_secondary_up.csv"      # POS  -> Zeitreihen!H
+SRL_CSV_DOWN_FILENAME = "out_secondary_down.csv"  # NEG  -> Zeitreihen!G
+SRL_CSV_PRICE_COLUMN = "overall_avg_price"        # = Spalte S
+SRL_CSV_PRICE_COLUMN_INDEX = 18                   # Fallback: Spalte S (0-basiert)
+SRL_CSV_DATE_COLUMN = "date"
+SRL_MW_H_TO_KWH = 1000.0                          # CHF/MW/h -> CHF/kWh
+STAMMDATEN_DIRNAME = "03 Stammdaten"
+SRL_QUELLE_CELL = "E50"                           # Transparenz-Notiz (wie E5)
+SRL_DEFAULT_KUNDENFAKTOR = 0.5                    # Fallback fuer alte Inputfiles
+
+
+def find_stammdaten_dir(input_path: str, explicit: str | None = None) -> str | None:
+    """
+    Sucht den zentralen Stammdaten-Ordner ("03 Stammdaten").
+    Reihenfolge: (1) explizit uebergeben, (2) Umgebungsvariable
+    BATTERIE_STAMMDATEN_DIR (setzen die run_*.bat automatisch), (3) Ordner
+    "03 Stammdaten" im Inputs-Ordner, im Skript-Ordner oder in deren
+    uebergeordneten Ordnern (bis 4 Ebenen hoch, tolerant gegen "03_Stammdaten").
+
+    Der projektlokale Altlast-Ordner "<Inputs>/Input" sowie Inputs-/Skript-
+    Ordner selbst werden bewusst NICHT mehr durchsucht.
+    """
+    cands: list[str] = []
+    if explicit:
+        cands.append(explicit)
+    env = os.environ.get("BATTERIE_STAMMDATEN_DIR")
+    if env:
+        cands.append(env)
+    starts = [os.path.dirname(os.path.abspath(input_path)), SCRIPT_DIR, DATA_DIR]
+    for start in starts:
+        d = start
+        for _ in range(5):
+            cands.append(os.path.join(d, STAMMDATEN_DIRNAME))
+            try:  # tolerant gegen abweichende Schreibweise ("03_Stammdaten" etc.)
+                for name in os.listdir(d):
+                    n = name.lower().replace("_", " ")
+                    if n.startswith("03 stammdaten"):
+                        cands.append(os.path.join(d, name))
+            except OSError:
+                pass
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    seen = set()
+    for c in cands:
+        c = os.path.abspath(c)
+        if c in seen:
+            continue
+        seen.add(c)
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def stammdaten_datei(input_path: str, dateiname: str, explicit_dir: str | None = None) -> str:
+    """
+    Vollstaendiger Pfad einer Stammdaten-Datei in "03 Stammdaten". Existiert
+    die Datei (noch) nicht, wird trotzdem der erwartete Pfad zurueckgegeben,
+    damit Fehlermeldungen den richtigen Ort nennen.
+    """
+    d = find_stammdaten_dir(input_path, explicit_dir)
+    if d is None:
+        d = os.path.join(os.path.dirname(os.path.abspath(input_path)), STAMMDATEN_DIRNAME)
+        print(
+            f"  WARNUNG: Ordner '{STAMMDATEN_DIRNAME}' nicht gefunden (weder ueber "
+            "BATTERIE_STAMMDATEN_DIR noch oberhalb der Inputs-Datei/des Codes)."
+        )
+    return os.path.join(d, dateiname)
+
+
+def find_srl_csv_dir(input_path: str, explicit: str | None = None) -> str | None:
+    """
+    Ordner mit out_secondary_up.csv + out_secondary_down.csv -- immer der
+    zentrale Stammdaten-Ordner (siehe find_stammdaten_dir()).
+    """
+    d = find_stammdaten_dir(input_path, explicit)
+    if (d and os.path.isfile(os.path.join(d, SRL_CSV_UP_FILENAME))
+            and os.path.isfile(os.path.join(d, SRL_CSV_DOWN_FILENAME))):
+        return d
+    return None
+
+
+def load_srl_market_prices(csv_path: str) -> pd.Series:
+    """
+    Liest eine out_secondary_*.csv und liefert den Tagespreis in CHF/kWh
+    (Index: Datum als normalisierter, tz-naiver Timestamp).
+
+    Preis = Spalte S ("overall_avg_price", volumengewichteter Durchschnitt
+    ueber Tages- + Wochenprodukt, CHF/MW/h) / 1000. Die CSV hat mehrere Zeilen
+    je Tag (je Produkt), Spalte S ist pro Tag identisch -> je Tag ein Wert.
+    """
+    df = pd.read_csv(csv_path, sep=";", encoding="utf-8-sig")
+    if SRL_CSV_DATE_COLUMN not in df.columns:
+        raise RuntimeError(f"{csv_path}: Spalte '{SRL_CSV_DATE_COLUMN}' fehlt (gefunden: {list(df.columns)}).")
+    if SRL_CSV_PRICE_COLUMN in df.columns:
+        price_col = SRL_CSV_PRICE_COLUMN
+    elif df.shape[1] > SRL_CSV_PRICE_COLUMN_INDEX:
+        price_col = df.columns[SRL_CSV_PRICE_COLUMN_INDEX]
+        warnings.warn(
+            f"{os.path.basename(csv_path)}: Spalte '{SRL_CSV_PRICE_COLUMN}' nicht gefunden -- "
+            f"verwende Spalte S = '{price_col}'."
+        )
+    else:
+        raise RuntimeError(f"{csv_path}: Preisspalte S nicht vorhanden.")
+    d = pd.DataFrame({
+        "date": pd.to_datetime(df[SRL_CSV_DATE_COLUMN], errors="coerce").dt.normalize(),
+        "p": pd.to_numeric(df[price_col], errors="coerce"),
+    }).dropna()
+    if d.empty:
+        raise RuntimeError(f"{csv_path}: keine gueltigen Datum/Preis-Zeilen.")
+    g = d.groupby("date")["p"]
+    spread = (g.max() - g.min()).max()
+    if spread > 1e-6:
+        warnings.warn(
+            f"{os.path.basename(csv_path)}: Spalte S ist nicht je Tag identisch "
+            f"(max. Abweichung {spread:.4f}) -- es wird der Tagesmittelwert verwendet."
+        )
+    return (g.mean() / SRL_MW_H_TO_KWH).sort_index()
+
+
+def read_srl_forecast(ws_hilfen) -> dict[str, dict[int, float]]:
+    """
+    Liest die monatlichen Forecast-Preise (Markt, CHF/kWh) aus Hilfen_Listen:
+    POS: I4:J15 (Monat_Nr, Preis), NEG: I19:J30.
+    """
+    out: dict[str, dict[int, float]] = {}
+    for name, first, hdr in (("POS", 4, 3), ("NEG", 19, 18)):
+        h = ws_hilfen.cell(row=hdr, column=10).value  # J3 / J18
+        if h is None or "markt" not in str(h).lower() or "kunde" in str(h).lower():
+            raise RuntimeError(
+                f"Hilfen_Listen!J{hdr} = {h!r}, erwartet eine Ueberschrift 'Forecast_Markt' -- "
+                "das SRL-Forecast-Layout im Hilfsblatt passt nicht zum neuen Template "
+                "(Spalte J = Forecast_Markt je Monat). Bitte das aktualisierte Inputfile "
+                "verwenden (siehe input_prep.read_srl_forecast())."
+            )
+        m: dict[int, float] = {}
+        for r in range(first, first + 12):
+            mon = ws_hilfen.cell(row=r, column=9).value
+            val = ws_hilfen.cell(row=r, column=10).value
+            if mon is None or val is None:
+                raise RuntimeError(f"Hilfen_Listen: SRL-Forecast {name} Zeile {r} unvollstaendig (Monat={mon!r}, Preis={val!r}).")
+            m[int(mon)] = float(val)
+        if sorted(m) != list(range(1, 13)):
+            raise RuntimeError(f"Hilfen_Listen: SRL-Forecast {name} deckt nicht Monate 1-12 ab: {sorted(m)}.")
+        out[name] = m
+    return out
+
+
+def normalize_srl_schema(raw) -> tuple[str, str | None]:
+    """'Kunde'/'Markt' (Gross-/Kleinschreibung egal). Alte Werte wie
+    'Backcast_2025_Markt' / 'Forecast_2027_Kunde' werden mit Hinweis
+    uebernommen. Gibt (schema, hinweis|None) zurueck."""
+    s = str(raw).strip() if raw is not None else ""
+    low = s.lower()
+    if low in ("kunde", "markt"):
+        return low.capitalize(), None
+    if low.endswith("kunde") or low.endswith("markt"):
+        neu = "Kunde" if low.endswith("kunde") else "Markt"
+        return neu, (f"Parameter!C50 enthielt den alten Wert '{s}' -- wird als '{neu}' "
+                     "interpretiert (neu gibt es nur noch 'Kunde' oder 'Markt').")
+    raise RuntimeError(
+        f"Parameter!C50 (SRL-Leistung-Preise) = {raw!r}: erlaubt sind nur 'Kunde' oder 'Markt'."
+    )
+
+
+def build_srl_prices(
+    index: pd.DatetimeIndex,
+    market_up: pd.Series,
+    market_down: pd.Series,
+    forecast: dict[str, dict[int, float]],
+    schema: str,
+    kundenfaktor: float,
+    energie_aufschlag: float,
+) -> tuple[pd.Series, pd.Series, dict]:
+    """
+    Berechnet SRL-NEG- und POS-Preis (CHF/kWh) je Zeitschritt.
+    Vergangenheit = Tag liegt im CSV-Bereich (und hat dort einen Eintrag),
+    sonst monatlicher Forecast. Danach x Kundenfaktor (nur 'Kunde') und
+    x (1 + Energie-Aufschlag).
+    """
+    dates = pd.DatetimeIndex(index.tz_localize(None)).normalize()
+    months = dates.month
+    factor = kundenfaktor if schema == "Kunde" else 1.0
+    uplift = 1.0 + float(energie_aufschlag)
+
+    def _one(market: pd.Series, fc: dict[int, float]) -> tuple[pd.Series, pd.Series]:
+        base = pd.Series(months, index=index).map(fc).astype(float)
+        mk = pd.Series(dates, index=index).map(market)
+        is_market = mk.notna() & (dates <= market.index.max()) & (dates >= market.index.min())
+        base = base.where(~is_market, mk)
+        return base * factor * uplift, is_market
+
+    neg, neg_mk = _one(market_down, forecast["NEG"])
+    pos, pos_mk = _one(market_up, forecast["POS"])
+    n = len(index)
+    info = {
+        "anteil_markt_pos": float(pos_mk.sum()) / n if n else 0.0,
+        "anteil_markt_neg": float(neg_mk.sum()) / n if n else 0.0,
+        "csv_von": min(market_up.index.min(), market_down.index.min()),
+        "csv_bis": min(market_up.index.max(), market_down.index.max()),
+        "faktor": factor, "uplift": uplift,
+    }
+    return neg, pos, info
+
+
+def srl_quelle_text(schema: str, info: dict, kundenfaktor: float, energie_aufschlag: float) -> str:
+    """Kurzer Text fuer Parameter!E50 (landet im Report)."""
+    anteil = 0.5 * (info["anteil_markt_pos"] + info["anteil_markt_neg"])
+    teile = [
+        f"SRL-Preise {schema}: Marktpreise (CSV, Spalte S) fuer {anteil * 100:.0f}% der Zeitschritte "
+        f"(CSV bis {info['csv_bis']:%d.%m.%Y})",
+        "Rest = monatlicher Forecast" if anteil < 0.9999 else "kein Forecast noetig",
+    ]
+    if schema == "Kunde":
+        teile.append(f"Kundenfaktor {kundenfaktor:g}")
+    teile.append(f"SRL-Energie-Aufschlag +{energie_aufschlag * 100:g}%")
+    return "; ".join(teile)
 
 
 # --------------------------------------------------------------------------
@@ -1043,6 +1299,7 @@ def main(
     pv_lon: float | None = None,
     swissix_csv_path: str | None = None,
     rmp_path: str | None = None,
+    srl_csv_dir: str | None = None,
 ):
     print(f"Lese {input_path} ...")
     wb_values = load_workbook(input_path, data_only=True)   # fuer gecachte Werte (G/H)
@@ -1212,9 +1469,7 @@ def main(
     # fuer das, was danach immer noch fehlt. Siehe resolve_swissix() weiter
     # oben fuer die Details; hier nur der Pfad-Aufbau + der Aufruf.
     if swissix_csv_path is None:
-        swissix_csv_path = os.path.join(
-            os.path.dirname(os.path.abspath(input_path)), SWISSIX_CSV_SUBDIR, SWISSIX_CSV_FILENAME
-        )
+        swissix_csv_path = stammdaten_datei(input_path, SWISSIX_CSV_FILENAME)
     swissix, swissix_quelle = resolve_swissix(index, swissix_csv_path, fetch_swissix, existing_swissix)
     if swissix is not None:
         for r, v in zip(range(2, n_rows + 1), swissix.values):
@@ -1262,9 +1517,7 @@ def main(
     # Fehler sein. Wird sie GEBRAUCHT aber fehlt, wirft resolve_rueckliefertarif()
     # weiter unten einen klaren Fehler (rmp_lookup=None).
     if rmp_path is None:
-        rmp_path = os.path.join(
-            os.path.dirname(os.path.abspath(input_path)), SOLAR_RMP_SUBDIR, SOLAR_RMP_FILENAME
-        )
+        rmp_path = stammdaten_datei(input_path, SOLAR_RMP_FILENAME)
     if os.path.isfile(rmp_path):
         print(f"Lade RMP-Quartalswerte aus {rmp_path} ...")
         rmp_lookup = load_rmp_lookup(rmp_path)
@@ -1315,13 +1568,58 @@ def main(
             "main(fetch_pv=True, pv_lat=..., pv_lon=...) aufrufen, sobald bekannt."
         )
 
-    # --- 4. SRL-Preise "backen" (bereits im Original per Formel berechnet) --
-    print("Uebernehme SRL-Preise (bereits vorhanden) als feste Werte ...")
-    for r in range(2, n_rows + 1):
-        for col in (COL_SRL_NEG, COL_SRL_POS):
-            cached = ws_zeit_vals.cell(row=r, column=col).value
-            if cached is not None:
-                ws_zeit.cell(row=r, column=col).value = cached
+    # --- 4. SRL-Preise (NEU: Markt/Kunde, CSV-Marktpreise + Forecast) ---------
+    # Siehe Kommentarblock "4b" weiter oben fuer die Logik.
+    print("Berechne SRL-Preise ...")
+    srl_schema, srl_hinweis = normalize_srl_schema(params["srl_preisschema"])
+    if srl_hinweis:
+        warnings.warn(srl_hinweis)
+    ws_param["C50"] = srl_schema  # normalisiert zurueckschreiben (-> Auswertung)
+
+    aufschlag = params["srl_energie_aufschlag"]
+    aufschlag = 0.0 if aufschlag is None else float(aufschlag)
+
+    kf = params["srl_kundenfaktor"]
+    if kf is None:
+        kf_alt = wb_values["Hilfen_Listen"]["N1"].value if "Hilfen_Listen" in wb.sheetnames else None
+        kf = float(kf_alt) if isinstance(kf_alt, (int, float)) else SRL_DEFAULT_KUNDENFAKTOR
+        if srl_schema == "Kunde":
+            warnings.warn(
+                f"Parameter!A52 'SRL-Kundenfaktor' fehlt (altes Inputfile) -- verwende {kf:g} "
+                "(aus Hilfen_Listen!N1 bzw. Standard 0.5)."
+            )
+    kf = float(kf)
+
+    csv_dir = find_srl_csv_dir(input_path, srl_csv_dir)
+    if csv_dir is None:
+        raise RuntimeError(
+            f"SRL-Marktpreise nicht gefunden: {SRL_CSV_UP_FILENAME} und {SRL_CSV_DOWN_FILENAME} "
+            f"muessen im Ordner '{STAMMDATEN_DIRNAME}' liegen "
+            f"(gesucht: {find_stammdaten_dir(input_path, srl_csv_dir) or 'Ordner nicht gefunden'}). "
+            "Pfad ggf. via Umgebungsvariable BATTERIE_STAMMDATEN_DIR bzw. main(srl_csv_dir=...) angeben."
+        )
+    print(f"  SRL-CSVs aus {csv_dir}")
+    market_up = load_srl_market_prices(os.path.join(csv_dir, SRL_CSV_UP_FILENAME))
+    market_down = load_srl_market_prices(os.path.join(csv_dir, SRL_CSV_DOWN_FILENAME))
+    forecast = read_srl_forecast(wb_values["Hilfen_Listen"])
+
+    srl_neg, srl_pos, srl_info = build_srl_prices(
+        index, market_up, market_down, forecast, srl_schema, kf, aufschlag
+    )
+    if srl_info["anteil_markt_pos"] < 1.0 or srl_info["anteil_markt_neg"] < 1.0:
+        print(
+            f"  Markt-Anteil POS {srl_info['anteil_markt_pos'] * 100:.1f}% / NEG "
+            f"{srl_info['anteil_markt_neg'] * 100:.1f}% der Zeitschritte, Rest = Forecast "
+            f"(CSV-Bereich {srl_info['csv_von']:%d.%m.%Y}-{srl_info['csv_bis']:%d.%m.%Y})."
+        )
+    for r, vn, vp in zip(range(2, n_rows + 1), srl_neg.values, srl_pos.values):
+        ws_zeit.cell(row=r, column=COL_SRL_NEG).value = float(vn)
+        ws_zeit.cell(row=r, column=COL_SRL_POS).value = float(vp)
+    ws_param[SRL_QUELLE_CELL] = srl_quelle_text(srl_schema, srl_info, kf, aufschlag)
+    print(
+        f"  SRL {srl_schema}: Mittel NEG {srl_neg.mean():.5f} / POS {srl_pos.mean():.5f} CHF/kWh "
+        f"(inkl. Kundenfaktor {srl_info['faktor']:g} und Energie-Aufschlag +{aufschlag * 100:g}%)."
+    )
 
     # --- 5. Speichern ----------------------------------------------------
     print(f"Speichere {output_path} ...")

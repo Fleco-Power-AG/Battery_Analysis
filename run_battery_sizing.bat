@@ -1,108 +1,86 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
+chcp 65001 >nul
+title Batterieanalyse - Sizing-Sweep
 
-echo === Battery Analysis: Starting Sizing Sweep ===
+rem ============================================================================
+rem  Ablage : Hauptordner "17 Batterieanalyse"
+rem  Start  : Inputs_<Name>.xlsx auf diese Datei ziehen ODER doppelklicken und
+rem           die Datei ins Fenster ziehen.
+rem  Ergebnisse landen im Unterordner "Output" neben der Inputs-Datei.
+rem ============================================================================
+
+set "ROOT=%~dp0"
+set "CODE=%ROOT%05 Code"
+set "SETUP=%ROOT%06 Setup"
+set "SKRIPT=battery_sizing.py"
+
+echo === Batterieanalyse: Sizing-Sweep ===
 echo.
 
-where conda >nul 2>nul
-if errorlevel 1 (
-    REM Same auto-detection as in setup.bat -- "conda" is not known by
-    REM default when double-clicked, even if Anaconda/Miniconda is installed.
-    echo "conda" is not known in this window -- searching the usual install locations ...
-    set "CONDA_FOUND="
-    for %%P in (
-        "%USERPROFILE%\anaconda3"
-        "%USERPROFILE%\miniconda3"
-        "%LOCALAPPDATA%\anaconda3"
-        "%LOCALAPPDATA%\miniconda3"
-        "%LOCALAPPDATA%\Continuum\anaconda3"
-        "%LOCALAPPDATA%\Continuum\miniconda3"
-        "C:\ProgramData\Anaconda3"
-        "C:\ProgramData\Miniconda3"
-        "C:\Anaconda3"
-        "C:\Miniconda3"
-    ) do (
-        if not defined CONDA_FOUND (
-            if exist "%%~P\Scripts\conda.exe" (
-                set "CONDA_FOUND=%%~P"
-            )
-        )
-    )
-
-    if defined CONDA_FOUND (
-        echo Found at: !CONDA_FOUND! -- activating Conda ...
-        call "!CONDA_FOUND!\Scripts\activate.bat" "!CONDA_FOUND!"
-        where conda >nul 2>nul
-    )
-
-    if errorlevel 1 (
-        echo.
-        echo ERROR: "conda" was not found. Please run setup.bat first,
-        echo or start this script from the "Anaconda Prompt" ^(search the Start menu^).
-        pause
-        exit /b 1
-    )
+if not exist "%CODE%\%SKRIPT%" (
+    echo [FEHLER] "%CODE%\%SKRIPT%" nicht gefunden.
+    echo          Liegt diese Datei im Hauptordner neben "05 Code"?
+    goto :ende
+)
+if not exist "%SETUP%\conda_aktivieren.bat" (
+    echo [FEHLER] "%SETUP%\conda_aktivieren.bat" nicht gefunden.
+    goto :ende
 )
 
-echo Activating environment "batterieanalyse" ...
-call conda activate batterieanalyse
-if errorlevel 1 (
-    echo.
-    echo ERROR: Environment "batterieanalyse" not found. Please run setup.bat first.
-    pause
-    exit /b 1
-)
+call "%SETUP%\conda_aktivieren.bat"
+if errorlevel 1 goto :ende
 
-REM This .bat lives in the Battery Analysis main folder (same level as
-REM setup.bat), while battery_sizing.py lives in the "Code" subfolder --
-REM so switch into that subfolder, regardless of where this script was
-REM launched from (e.g. double-click vs. file drag & drop).
-if not exist "%~dp0Code\battery_sizing.py" (
-    echo.
-    echo ERROR: "Code\battery_sizing.py" was not found under:
-    echo   %~dp0Code
-    echo Is run_battery_sizing.bat located in the Battery Analysis main
-    echo folder, right next to the "Code" folder? If the Code folder has a
-    echo different name or location, please let me know.
-    pause
-    exit /b 1
-)
-cd /d "%~dp0Code"
-
-REM Same console-based file input as run_battery_analysis.bat (a tkinter
-REM pop-up is unreliable from a .bat-launched console) -- drag your
-REM Inputs.xlsx into this window and press Enter, or type the path.
+rem ---- Inputs-Datei: per Drag and Drop aufs Icon oder ins Fenster ------------
 set "INPUT_FILE=%~1"
-if "%INPUT_FILE%"=="" (
-    echo.
-    echo No file was passed via drag ^& drop onto this .bat icon.
-    set /p "INPUT_FILE=Drag your Inputs.xlsx into this window and press Enter (or type the path): "
+if defined INPUT_FILE goto :input_da
+echo.
+echo Inputs-Datei ins Fenster ziehen und Enter druecken:
+set /p "INPUT_FILE=> "
+:input_da
+if not defined INPUT_FILE (
+    echo [FEHLER] Kein Dateipfad angegeben.
+    goto :ende
 )
-REM Windows wraps a drag&dropped path in quotes automatically -- remove
-REM them here, since we add our own quotes below.
 set "INPUT_FILE=%INPUT_FILE:"=%"
+if not exist "%INPUT_FILE%" (
+    echo [FEHLER] Datei nicht gefunden: "%INPUT_FILE%"
+    goto :ende
+)
+for %%F in ("%INPUT_FILE%") do set "INPUT_DIR=%%~dpF"
 
-if "%INPUT_FILE%"=="" (
-    echo.
-    echo ERROR: No file path given. Aborting.
-    pause
-    exit /b 1
+rem ---- Vorlagen nicht direkt rechnen, Output-Ordner sicherstellen ------------
+echo "%INPUT_DIR%" | findstr /I /L /C:"02 Vorlagen" >nul
+if not errorlevel 1 (
+    echo [FEHLER] Die Datei liegt im Ordner "02 Vorlagen".
+    echo          Vorlagen bitte nicht direkt rechnen. Mit run_alles.bat und
+    echo          Option [1] ein neues Projekt anlegen.
+    goto :ende
+)
+if not exist "%INPUT_DIR%Output" (
+    mkdir "%INPUT_DIR%Output"
+    echo [INFO] Output-Ordner angelegt.
 )
 
 echo.
-echo Starting battery_sizing.py with:
+echo Starte %SKRIPT% mit:
 echo   %INPUT_FILE%
 echo.
-echo NOTE: this runs a full optimization for several battery size combinations
-echo (capacity x power), so it takes noticeably longer than a normal single run.
+echo HINWEIS: Der Sweep rechnet eine volle Optimierung pro Batteriegroesse
+echo          und C-Rate und dauert deutlich laenger als ein Einzellauf.
 echo.
 
-python battery_sizing.py "%INPUT_FILE%"
-
-echo.
+cd /d "%CODE%"
+python "%SKRIPT%" "%INPUT_FILE%"
 if errorlevel 1 (
-    echo === ERROR during execution. See messages above. ===
+    echo.
+    echo === FEHLER bei der Ausfuehrung, siehe Meldungen oben. ===
 ) else (
-    echo === Done! Sweep Excel and Heatmap PDF are in the Output/Inputs folder. ===
+    echo.
+    echo === Fertig. Ergebnisse liegen im Unterordner "Output" der Inputs-Datei. ===
 )
+
+:ende
+echo.
 pause
+endlocal
