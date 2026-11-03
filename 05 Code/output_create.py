@@ -1923,9 +1923,11 @@ def build_input_summary_rows(
         return zeilen
 
     rows += [{"label": "Rücklieferung", "style": "header"}]
-    rows += _ruecklieferung_pv_zeilen(
-        "rueckliefer_pv_schema", "rueckliefer_pv_hkn", "rueckliefer_pv_floor", "rueckliefer_pv_fixtarif"
-    )
+    # PV-Rueckliefertarif nur zeigen, wenn eine PV-Anlage vorhanden ist (Beat, 3.11.2026)
+    if not _ist_wert_null(params.get("dc_leistung")):
+        rows += _ruecklieferung_pv_zeilen(
+            "rueckliefer_pv_schema", "rueckliefer_pv_hkn", "rueckliefer_pv_floor", "rueckliefer_pv_fixtarif"
+        )
     rows += _ruecklieferung_batterie_zeilen(
         "rueckliefer_batterie_schema", "rueckliefer_batterie_hkn", "rueckliefer_batterie_floor",
         "rueckliefer_batterie_fixtarif",
@@ -2588,7 +2590,9 @@ def build_pdf_report(
         effekte = []
         effekte.append("Eigenverbrauch" if last_vorhanden_zsf else None)
         effekte.append("Netzbezug" if bezug_tarif_relevant_zsf else None)
-        effekte.append("Lastspitzen" if last_vorhanden_zsf else None)
+        # Lastspitzen nur, wenn sie etwas kosten (Peak-Shaving mit Leistungspreis aktiv) --
+        # sonst spielen sie fuer die Wirtschaftlichkeit keine Rolle (Beat, 30.10.2026).
+        effekte.append("Lastspitzen" if (last_vorhanden_zsf and peakshaving_hat_tarif) else None)
         effekte_txt = _und_liste(effekte)
 
         # NEU (Beat, 18.9.2026: "auf Seite 1 bitte diesen Satz weglassen: ...die

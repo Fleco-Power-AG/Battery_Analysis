@@ -187,6 +187,9 @@ def parse_bericht(path) -> dict:
     b["ht_tage"] = _rx(r"HT-Tage\s+(.+)$", t, cast=str)
     b["pv_schema"] = _rx(r"PV-Schema\s+(\S+)", t, cast=str)
     b["bat_schema"] = _rx(r"Batterie-Schema\s+(\S+)", t, cast=str)
+    b["pv_fixtarif"] = _rx(r"PV-Fixtarif\s+" + NUM + r"\s*CHF/kWh", t)
+    b["pv_floor"] = _rx(r"PV-Floor\s+" + NUM + r"\s*CHF/kWh", t)
+    b["bat_fixtarif"] = _rx(r"Batterie-Fixtarif\s+" + NUM + r"\s*CHF/kWh", t)
     b["pv_kwp"] = _rx(r"DC-Leistung\s+" + NUM + r"\s*kWp", t)
     b["pv_abschaltung_neg"] = _rx(r"Abschaltung bei Negativpreisen\s+(\S+)", t, cast=str)
     b["bat_kw"] = _rx(r"Batteriespeicher\s+" + NUM + r"\s*kW\s*/", t)
@@ -327,24 +330,51 @@ def szenario(b, k: Kennzahlen, delta_srl_pct):
     return netto, (k.investition / cf if cf > 0 else float("inf")), cf / k.investition * 100
 
 
-def sizing(df: pd.DataFrame, ziel_roi: float) -> dict:
+def netzanschluss_kw(b, kunde) -> float | None:
+    """Maximale Leistung am Netzanschluss (kleinerer Wert aus Einspeisung/Bezug des Standorts).
+    Überschreibbar mit "max_leistung_kw" im Kunden-JSON (0 = keine Begrenzung)."""
+    if "max_leistung_kw" in kunde:
+        v = kunde["max_leistung_kw"]
+        return float(v) if v else None
+    werte = re.findall(r"[\d'’.,]+(?=\s*kW)", b.get("netz_standort") or "")
+    werte = [_f(w) for w in werte if _f(w) > 0]
+    return min(werte) if werte else None
+
+
+def sizing(df: pd.DataFrame, ziel_roi: float, p_max: float | None = None) -> dict:
     df = df.copy()
     df["label"] = df.apply(lambda r: f"{num(r.kapazitaet_kwh)} kWh / {num(r.leistung_kw)} kW", axis=1)
-    best_net = df.loc[df.netto_chf.idxmax()]
-    best_roi = df.sort_values(["roi_pct", "netto_chf"], ascending=False).iloc[0]
-    kand = df[df.roi_pct >= ziel_roi]
+    df["zulaessig"] = True if p_max is None else df.leistung_kw <= p_max + 1e-6
+    z = df[df.zulaessig] if df.zulaessig.any() else df
+    best_net = z.loc[z.netto_chf.idxmax()]
+    best_roi = z.sort_values(["roi_pct", "netto_chf"], ascending=False).iloc[0]
+    kand = z[z.roi_pct >= ziel_roi]
     ausgewogen = kand.loc[kand.netto_chf.idxmax()] if len(kand) else best_roi
     caps = sorted(df.kapazitaet_kwh.unique())
     rates = sorted(df.c_rate.unique())
-    # dominiert eine C-Rate in allen Zeilen?
-    dom = df.loc[df.groupby("kapazitaet_kwh").netto_chf.idxmax(), "c_rate"].unique()
+    dom = z.loc[z.groupby("kapazitaet_kwh").netto_chf.idxmax(), "c_rate"].unique()
+    gleich = lambda a, b_: a.kapazitaet_kwh == b_.kapazitaet_kwh and a.c_rate == b_.c_rate
+    ausgeschlossen = int((~df.zulaessig).sum())
     return dict(
-        df=df, caps=caps, rates=rates, best_net=best_net, best_roi=best_roi,
-        ausgewogen=ausgewogen, ziel_roi=ziel_roi,
+        df=df, z=z, caps=caps, rates=rates, best_net=best_net, best_roi=best_roi,
+        ausgewogen=ausgewogen, ziel_roi=ziel_roi, p_max=p_max, ausgeschlossen=ausgeschlossen,
+        a_gleich_e=gleich(ausgewogen, best_net), a_gleich_r=gleich(ausgewogen, best_roi),
         dominante_crate=dom[0] if len(dom) == 1 else None,
-        rand_optimum=bool(best_net.kapazitaet_kwh == max(caps)),
-        negative=df[df.netto_chf < 0],
+        rand_optimum=bool(best_net.kapazitaet_kwh == max(caps)) and ausgeschlossen == 0,
+        netz_begrenzt=ausgeschlossen > 0,
+        negative=z[z.netto_chf < 0],
     )
+
+
+def varianten(sz):
+    """R/A/E ohne Doppelungen: A entfällt, wenn identisch mit E oder R."""
+    v = [("R", sz["best_roi"])]
+    if not (sz["a_gleich_e"] or sz["a_gleich_r"]):
+        v.append(("A", sz["ausgewogen"]))
+    v.append(("E", sz["best_net"]))
+    if len(v) == 2 and v[0][1].kapazitaet_kwh == v[1][1].kapazitaet_kwh and v[0][1].c_rate == v[1][1].c_rate:
+        v = [("E", sz["best_net"])]
+    return v
 
 
 def detail_konsistent(b, sz, tol=0.03) -> bool:
@@ -378,7 +408,7 @@ def plausibilitaet(b, k: Kennzahlen, sz: dict | None) -> list[str]:
         b["amortisationsdauer_j"], tol=0.06)
     chk("Kapitalverzinsung ((Ertrag−OPEX)/Inv)", (k.op_ertrag - k.opex) / k.investition * 100,
         b["kapitalverzinsung_pct"], tol=0.06)
-    if b.get("spitze_avg_ohne") is not None:
+    if b.get("spitze_avg_ohne") is not None and b.get("leistungspreis"):
         est = (b["spitze_avg_ohne"] - b["spitze_avg_mit"]) * 12 * b["leistungspreis"]
         chk("Peak-Shaving ≈ ΔØSpitze×12×Leistungspreis (gerundete Ø)", est, b["einnahmen"]["Peak-Shaving"], tol=150)
     if k.investition_abgeleitet:
@@ -509,11 +539,11 @@ def chart_sensitivitaet(b, k: Kennzahlen, path, bereich=(-50, 50)):
         ax.set_xlim(lo, hi)
         ax.set_xticks(np.linspace(lo, hi, 5))
         ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{sgn(v)} %" if v else "0 %"))
-        ax.set_xlabel("SRL-Erlöse ggü. 2025")
+        ax.set_xlabel(f"SRL-Erlöse ggü. {periode(b)['kurz']}")
     a1.fill_between(d, net, 0, where=net >= 0, color=C["light"], alpha=0.55, lw=0)
     a1.plot(d, net, color=C["dark"], lw=2)
     a1.scatter([0], [b["netto"]], color=C["dark"], zorder=5, s=28)
-    a1.annotate("Basis 2025", (0, b["netto"]), xytext=(8, -12), textcoords="offset points", fontsize=7.5,
+    a1.annotate("Basis", (0, b["netto"]), xytext=(8, -12), textcoords="offset points", fontsize=7.5,
                 color=C["dark"])
     a1.set_ylim(min(0, net.min() * 1.1), net.max() * 1.12)
     a1.set_title("Nettogewinn pro Jahr [CHF]", loc="left")
@@ -521,7 +551,7 @@ def chart_sensitivitaet(b, k: Kennzahlen, path, bereich=(-50, 50)):
 
     a2.plot(d, pb, color=C["dark"], lw=2)
     a2.scatter([0], [b["amortisationsdauer_j"]], color=C["dark"], zorder=5, s=28)
-    a2.annotate("Basis 2025", (0, b["amortisationsdauer_j"]), xytext=(8, 6), textcoords="offset points",
+    a2.annotate("Basis", (0, b["amortisationsdauer_j"]), xytext=(8, 6), textcoords="offset points",
                 fontsize=7.5, color=C["dark"])
     a2.set_ylim(0, np.nanmax(pb) * 1.2)
     a2.set_title("Amortisationsdauer [Jahre]", loc="left")
@@ -546,9 +576,15 @@ def chart_lastspitzen(ohne, mit, path):
     return _save(fig, path)
 
 
-def chart_schema(b, path):
-    fig, ax = plt.subplots(figsize=(7.2, 2.9))
-    ax.set_xlim(0, 10); ax.set_ylim(0, 4); ax.axis("off")
+def chart_schema(b, k, path):
+    """Systemschema. Zeigt nur vorhandene Komponenten (PV-Anlage nur bei DC-Leistung > 0,
+    Verbraucher nur mit Lastgang) und beschriftet die Flüsse mit den aktiven Anwendungen."""
+    pv, last = pv_da(b), last_da(b)
+    m = k.module
+    y_net = 2.0
+    ytop = 4.0 if pv else 2.75
+    fig, ax = plt.subplots(figsize=(7.2, 2.9 * ytop / 4.0))
+    ax.set_xlim(0, 10); ax.set_ylim(0, ytop); ax.axis("off")
 
     def node(x, y, titel, wert, farbe, w=2.3, h=1.05):
         ax.add_patch(FancyBboxPatch((x - w / 2, y - h / 2), w, h, boxstyle="round,pad=0.02,rounding_size=0.18",
@@ -558,27 +594,34 @@ def chart_schema(b, path):
         ax.text(x - w / 2 + 0.32, y + 0.17, titel, fontsize=9.5, fontweight="bold", color=C["ink"], va="center", zorder=5)
         ax.text(x - w / 2 + 0.32, y - 0.20, wert, fontsize=8.5, color=C["grey"], va="center", zorder=5)
 
-    def arr(p1, p2, farbe, txt=None, both=False, rad=0.0, off=(0, 0.16)):
+    def arr(p1, p2, farbe, txt=None, both=False, off=(0, 0.16)):
         ax.add_patch(FancyArrowPatch(p1, p2, arrowstyle="<|-|>" if both else "-|>", mutation_scale=11,
-                                     color=farbe, lw=1.8, connectionstyle=f"arc3,rad={rad}", zorder=2))
+                                     color=farbe, lw=1.8, zorder=2))
         if txt:
             ax.text((p1[0] + p2[0]) / 2 + off[0], (p1[1] + p2[1]) / 2 + off[1], txt, fontsize=7.5,
-                    color=farbe, ha="center", zorder=6,
-                    bbox=dict(fc="white", ec="none", pad=1.2))
+                    color=farbe, ha="center", zorder=6, bbox=dict(fc="white", ec="none", pad=1.2))
 
-    node(5.0, 3.35, "PV-Anlage", f"{num(b['pv_kwp'])} kWp", C["amber"])
-    node(5.0, 0.65, "Batteriespeicher", f"{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh", C["dark"])
-    node(8.75, 2.0, "Verbraucher", f"{num(b['last_mwh'], 1)} MWh/Jahr", C["mid"], w=2.3)
-    node(1.25, 2.0, "Stromnetz", "Bezug & Rücklieferung", C["blue"], w=2.3)
-    arr((6.2, 3.2), (7.75, 2.55), C["amber"], "Direktverbrauch", off=(0.25, 0.1))
-    arr((5.0, 2.8), (5.0, 1.2), C["amber"], "Laden", off=(0.42, 0.5))
-    arr((6.2, 0.8), (7.75, 1.45), C["dark"], "Eigenverbrauch\n& Peak-Shaving", off=(0.35, -0.35))
-    arr((2.25, 1.45), (3.8, 0.8), C["dark"], "SRL · Arbitrage", both=True, off=(-0.35, -0.3))
-    arr((3.8, 3.2), (2.25, 2.55), C["amber"], "Einspeisung", off=(-0.25, 0.1))
-    ax.add_patch(FancyArrowPatch((2.45, 2.0), (7.55, 2.0), arrowstyle="-|>", mutation_scale=11,
-                                 color=C["blue"], lw=1.4, ls=(0, (4, 3)), zorder=1))
-    ax.text(3.35, 2.12, "Netzbezug", fontsize=7.5, color=C["blue"], ha="center",
-            bbox=dict(fc="white", ec="none", pad=1.2), zorder=6)
+    # Batterie unten mittig, Netz links, Verbraucher rechts, PV oben (falls vorhanden)
+    xb = 5.0 if last else 6.2
+    node(xb, 0.65, "Batteriespeicher", f"{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh", C["dark"])
+    node(1.25, y_net, "Stromnetz", "Bezug & Rücklieferung", C["blue"])
+    if last:
+        node(8.75, y_net, "Verbraucher", f"{num(b['last_mwh'], 1)} MWh/Jahr", C["mid"])
+        ax.add_patch(FancyArrowPatch((2.45, y_net), (7.55, y_net), arrowstyle="-|>", mutation_scale=11,
+                                     color=C["blue"], lw=1.4, ls=(0, (4, 3)), zorder=1))
+        ax.text(3.35, y_net + 0.12, "Netzbezug", fontsize=7.5, color=C["blue"], ha="center",
+                bbox=dict(fc="white", ec="none", pad=1.2), zorder=6)
+        lokal = [n for key, n in (("Eigenverbrauchsoptimierung", "Eigenverbrauch"), ("Peak-Shaving", "Peak-Shaving"))
+                 if m.get(key, 0) > 0]
+        arr((6.2, 0.8), (7.75, 1.45), C["dark"], "\n& ".join(lokal) if lokal else "Versorgung", off=(0.35, -0.35))
+    netz_txt = " · ".join(n for key, n in (("SRL", "SRL"), ("Arbitrage", "Arbitrage")) if m.get(key, 0) > 0)
+    arr((2.25, 1.45), (xb - 1.2, 0.8), C["dark"], netz_txt or "Laden / Entladen", both=True, off=(-0.35, -0.3))
+    if pv:
+        node(5.0, 3.35, "PV-Anlage", f"{num(b['pv_kwp'])} kWp", C["amber"])
+        if last:
+            arr((6.2, 3.2), (7.75, 2.55), C["amber"], "Direktverbrauch", off=(0.25, 0.1))
+        arr((5.0, 2.8), (5.0, 1.2), C["amber"], "Laden", off=(0.42, 0.5))
+        arr((3.8, 3.2), (2.25, 2.55), C["amber"], "Einspeisung", off=(-0.25, 0.1))
     return _save(fig, path)
 
 
@@ -591,7 +634,7 @@ def _cell_grid(ax, df, sz, wert, fmt, cmap, norm, titel, highlight):
     for _, r in df.iterrows():
         i, j = caps.index(r.kapazitaet_kwh), rates.index(r.c_rate)
         v = r[wert]
-        fc = cmap(norm(v))
+        fc = cmap(norm(v)) if r.get("zulaessig", True) else matplotlib.colors.to_rgba("#E9ECEA")
         ax.add_patch(FancyBboxPatch((j - 0.46, i - 0.43), 0.92, 0.86,
                                     boxstyle="round,pad=0,rounding_size=0.12", fc=fc, ec="white", lw=1))
         lum = 0.299 * fc[0] + 0.587 * fc[1] + 0.114 * fc[2]
@@ -615,7 +658,7 @@ def _cell_grid(ax, df, sz, wert, fmt, cmap, norm, titel, highlight):
 
 def chart_heatmaps(sz, path):
     df = sz["df"]
-    hl = {"R": sz["best_roi"], "A": sz["ausgewogen"], "E": sz["best_net"]}
+    hl = dict(varianten(sz))
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(7.2, 4.4), gridspec_kw=dict(wspace=0.38))
     vmax = max(abs(df.netto_chf.max()), abs(df.netto_chf.min()))
     cmap_net = LinearSegmentedColormap.from_list("net", [C["red"], "#F4E3DE", "#F4F7F3", C["light"], C["dark"]])
@@ -634,12 +677,19 @@ def chart_tradeoff(sz, b, path):
     df = sz["df"]
     fig, ax = plt.subplots(figsize=(7.2, 3.0))
     farben = {r: c for r, c in zip(sz["rates"], [C["grey2"], C["mid"], C["dark"], C["blue"]])}
+    kmax = df.kapazitaet_kwh.max()
+    groesse = lambda kap: 22 + 240 * kap / kmax
     for r in sz["rates"]:
         s = df[df.c_rate == r].sort_values("kapazitaet_kwh")
-        ax.plot(s.netto_chf / 1000, s.roi_pct, color=farben[r], lw=1.4, zorder=2)
-        ax.scatter(s.netto_chf / 1000, s.roi_pct, s=18 + s.kapazitaet_kwh / 9, color=farben[r],
+        ok = s[s.zulaessig]
+        ax.plot(ok.netto_chf / 1000, ok.roi_pct, color=farben[r], lw=1.4, zorder=2)
+        ax.scatter(ok.netto_chf / 1000, ok.roi_pct, s=groesse(ok.kapazitaet_kwh), color=farben[r],
                    edgecolor="white", lw=0.8, zorder=3, label=f"{r:g}C", alpha=0.85)
-    for tag, row in {"R": sz["best_roi"], "A": sz["ausgewogen"], "E": sz["best_net"]}.items():
+        nok = s[~s.zulaessig]
+        if len(nok):
+            ax.scatter(nok.netto_chf / 1000, nok.roi_pct, s=groesse(nok.kapazitaet_kwh), facecolor="none",
+                       edgecolor=farben[r], lw=0.8, ls=":", zorder=2, alpha=0.6)
+    for tag, row in varianten(sz):
         px, py = row.netto_chf / 1000, row.roi_pct
         ax.scatter([px], [py], s=700, color=C["amber"], alpha=0.25, lw=0, zorder=1)            # Halo
         ax.scatter([px], [py], s=260, facecolor="none", edgecolor=C["ink"], lw=1.8, zorder=6)  # Ring
@@ -656,6 +706,8 @@ def chart_tradeoff(sz, b, path):
     ax.set_xlabel("Nettogewinn [1’000 CHF/Jahr]")
     ax.set_ylabel("Kapitalverzinsung [%]")
     ax.plot([], [], ls="none", label="Punktgrösse = Kapazität")
+    if sz["netz_begrenzt"]:
+        ax.scatter([], [], s=40, facecolor="none", edgecolor=C["grey"], ls=":", label="über Netzanschluss")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=6, fontsize=7.5, markerscale=0.7,
               handletextpad=0.4, columnspacing=1.4)
     return _save(fig, path)
@@ -678,6 +730,7 @@ _NBSP = re.compile(r"(\d) (%|CHF|kWh|kWp|kW|MWh|Rp|Jahren|Jahre|Prozentpunkte)")
 
 
 def para(c, text, x, y_top, w, style=None):
+    text = re.sub(r"&(?!(?:amp|lt|gt|quot|nbsp|#\d+);)", "&amp;", text)
     text = _NBSP.sub(lambda m: m.group(1) + "&nbsp;" + m.group(2), text)
     p = Paragraph(text, style or S())
     _, h = p.wrap(w, 1000)
@@ -712,10 +765,12 @@ class Doc:
         self.c.setAuthor("Fleco Power AG")
         self.page = 0
         self.total = None
-        self.kapitel = 0
+        self.kap_nr = 0
 
-    def header(self, nr, titel):
-        self.kapitel = nr
+    TOP = H - 30 * mm      # erste Inhaltszeile unter dem Seitenkopf
+    BOTTOM = 20 * mm       # unterste Inhaltszeile über der Fusszeile
+
+    def seitenkopf(self):
         c = self.c
         logo = ASSETS / "fleco_logo_rund.png"
         if logo.exists():
@@ -726,14 +781,18 @@ class Doc:
                           + (f"  ·  Projekt {projekt(self.kunde)}" if projekt(self.kunde) else ""))
         c.setStrokeColor(HexColor(C["line"])); c.setLineWidth(0.6)
         c.line(M, H - 24 * mm, W - M, H - 24 * mm)
-        # Kapiteltitel
-        y = H - 38 * mm
+
+    def kapitel(self, titel, y=None):
+        """Kapiteltitel mit fortlaufender Nummer an Position y (Standard: Seitenanfang)."""
+        self.kap_nr += 1
+        c = self.c
+        y = (self.TOP if y is None else y) - 8 * mm
         rrect(c, M, y - 1.5 * mm, 11 * mm, 8 * mm, 2 * mm, fill=C["dark"])
         c.setFont("F-B", 11); c.setFillColor(white)
-        c.drawCentredString(M + 5.5 * mm, y + 0.9 * mm, f"{nr:02d}")
+        c.drawCentredString(M + 5.5 * mm, y + 0.9 * mm, f"{self.kap_nr:02d}")
         c.setFont("F-B", 19); c.setFillColor(HexColor(C["dark"]))
         c.drawString(M + 15 * mm, y, titel)
-        return H - 46 * mm
+        return y - 8 * mm
 
     def footer(self):
         c = self.c
@@ -854,6 +913,28 @@ def bereinige_kundendaten(o):
     return o
 
 
+def lade_kunden_json(pfad):
+    """Liest die Kunden-JSON tolerant: typografische Anführungszeichen und überzählige
+    Kommas vor } oder ] werden korrigiert. Bei anderen Fehlern klare Meldung mit Zeile."""
+    roh = Path(pfad).read_text(encoding="utf-8-sig")
+    text = (roh.replace("\u201c", '"').replace("\u201d", '"').replace("\u201e", '"')
+               .replace("\u00ab", '"').replace("\u00bb", '"'))
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        zeilen = roh.splitlines()
+        z = zeilen[e.lineno - 1] if 0 < e.lineno <= len(zeilen) else ""
+        vorher = zeilen[e.lineno - 2] if e.lineno >= 2 else ""
+        raise SystemExit(
+            f"\n[FEHLER] Kunden-JSON ist nicht gültig: {pfad}\n"
+            f"         Zeile {e.lineno}: {e.msg}\n"
+            f"           {e.lineno - 1:>3} | {vorher}\n"
+            f"           {e.lineno:>3} | {z}\n"
+            "         Häufige Ursachen: fehlendes Komma am Zeilenende, Feldname ohne \"\", "
+            "Anführungszeichen vergessen.")
+
+
 def auftraggeber(kunde):
     return (kunde.get("kunde") or {}).get("firma")
 
@@ -877,6 +958,60 @@ def quartalspreise(txt):
     return [float(x) * 100 for x in v] if len(v) == 4 else None
 
 
+MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober",
+          "November", "Dezember"]
+
+
+def periode(b):
+    """Analysierter Zeitraum aus dem Bericht.
+    bez:    '2025' bzw. 'Juli 2025 bis Juni 2026'
+    kurz:   '2025' bzw. '07/2025–06/2026'
+    phrase: 'des Jahres 2025' bzw. 'von Juli 2025 bis Juni 2026'"""
+    try:
+        v = pd.to_datetime(b.get("zeitraum_von"), dayfirst=True)
+        z = pd.to_datetime(b.get("zeitraum_bis"), dayfirst=True)
+    except Exception:
+        j = (b.get("zeitraum_von") or "")[-4:]
+        return dict(bez=j, kurz=j, phrase=f"des Jahres {j}")
+    if v.year == z.year and (v.month, v.day) == (1, 1) and (z.month, z.day) == (12, 31):
+        return dict(bez=str(v.year), kurz=str(v.year), phrase=f"des Jahres {v.year}")
+    bez = f"{MONATE[v.month - 1]} {v.year} bis {MONATE[z.month - 1]} {z.year}"
+    return dict(bez=bez, kurz=f"{v.month:02d}/{v.year}–{z.month:02d}/{z.year}", phrase=f"von {bez}")
+
+
+def ganzjahr(b):
+    try:
+        v = pd.to_datetime(b.get("zeitraum_von"), dayfirst=True)
+        z = pd.to_datetime(b.get("zeitraum_bis"), dayfirst=True)
+        return (z - v).days >= 360
+    except Exception:
+        return True
+
+
+def pv_da(b):
+    return (b.get("pv_kwp") or 0) > 0
+
+
+def last_da(b):
+    return (b.get("last_mwh") or 0) > 0
+
+
+def rueckliefer_text(schema, fixtarif=None, floor=None):
+    """Kundenverständliche Bezeichnung des Rückliefer-Schemas."""
+    sch = (schema or "").strip().lower()
+    if sch == "fixtarif":
+        if not fixtarif:
+            return "keine Vergütung (0 Rp/kWh)"
+        return f"Fixtarif {num(fixtarif * 100, 1)} Rp/kWh"
+    if sch == "spot":
+        return "Spotpreis"
+    if sch == "rmp":
+        return "Referenz-Marktpreis (RMP)"
+    if sch == "rmp_floor":
+        return "RMP" + (f", mind. {num(floor * 100, 1)} Rp/kWh" if floor else " mit Mindestpreis")
+    return schema or "–"
+
+
 def cfg_label(row):
     return f"{num(row.kapazitaet_kwh)} kWh / {num(row.leistung_kw)} kW"
 
@@ -887,7 +1022,7 @@ def text_summary(b, k, sz, kunde):
     namen = {"SRL": "der Vermarktung von Sekundärregelleistung (SRL)", "Peak-Shaving": "Peak-Shaving",
              "Eigenverbrauchsoptimierung": "der Optimierung des Eigenverbrauchs",
              "Einspeiseoptimierung": "der Einspeiseoptimierung", "Arbitrage": "Arbitrage"}
-    jahr = (b.get("zeitraum_von") or "")[-4:]
+    jahr = periode(b)["bez"]
     teile = []
     if auftraggeber(kunde):
         teile.append(f"Im Auftrag von <b>{auftraggeber(kunde)}</b> wurde")
@@ -897,8 +1032,9 @@ def text_summary(b, k, sz, kunde):
         teile.append(f"für das Projekt {projekt(kunde)}")
     if standort(kunde):
         teile.append(am_standort(kunde))
-    s = (" ".join(teile) + f" ein Batteriespeicher mit <b>{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh</b> über ein "
-         f"ganzes Betriebsjahr ({jahr}) simuliert. "
+    s = (" ".join(teile) + f" ein Batteriespeicher mit <b>{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh</b> "
+         + (f"über ein ganzes Betriebsjahr ({jahr})" if ganzjahr(b) else f"über den Zeitraum {jahr}")
+         + " simuliert. "
          f"Der Speicher erwirtschaftet einen operativen Ertrag von <b>{chf(k.op_ertrag)}</b> pro Jahr. "
          f"Nach Abzug von Finanzierung, Unterhalt und Degradation verbleibt ein Nettogewinn von "
          f"<b>{chf(b['netto'])}</b> pro Jahr. Die Investition ist nach rund <b>{num(b['amortisationsdauer_j'], 1)} Jahren</b> "
@@ -912,8 +1048,12 @@ def text_summary(b, k, sz, kunde):
     if sz is not None:
         s += (f"<br/><br/>Die Grössenanalyse über {len(sz['df'])} Varianten zeigt: Die höchste Kapitalverzinsung "
               f"erzielt ein kleiner Speicher ({cfg_label(sz['best_roi'])}, {sz['best_roi'].roi_pct:.0f} %), den höchsten "
-              f"absoluten Gewinn die Variante {cfg_label(sz['best_net'])} ({chf(sz['best_net'].netto_chf)}/Jahr). "
-              f"Als ausgewogene Lösung bietet sich <b>{cfg_label(sz['ausgewogen'])}</b> an.")
+              f"absoluten Gewinn die Variante {cfg_label(sz['best_net'])} ({chf(sz['best_net'].netto_chf)}/Jahr)"
+              + (f", die grösste Variante innerhalb des Netzanschlusses von {num(sz['p_max'])} kW. "
+                 if sz["netz_begrenzt"] else ". ")
+              + (f"Sie erreicht zugleich eine Verzinsung von über {sz['ziel_roi']:g} % und ist damit auch die "
+                 "ausgewogene Lösung." if sz["a_gleich_e"] else
+                 f"Als ausgewogene Lösung bietet sich <b>{cfg_label(sz['ausgewogen'])}</b> an."))
     return s
 
 
@@ -926,7 +1066,7 @@ def text_ertragsstruktur(b, k, kunde):
     s = (f"Mit {k.anteile['SRL']:.0f} % trägt die Vermarktung von Sekundärregelleistung den grössten Teil des "
          f"Ertrags. ")
     if net_lo > 0:
-        s += (f"Auch bei SRL-Erlösen, die {abs(lo):.0f} % unter dem Niveau von 2025 liegen, bleibt der Speicher mit "
+        s += (f"Auch wenn die SRL-Erlöse {abs(lo):.0f} % tiefer liegen als im analysierten Zeitraum, bleibt der Speicher mit "
               f"{chf(net_lo)} pro Jahr wirtschaftlich. ")
     s += "Kapitel 05 zeigt die Wirkung unterschiedlicher Preisniveaus auf Gewinn und Amortisation."
     return s
@@ -987,9 +1127,9 @@ def seite_titel(d: Doc, b, k, sz, ch):
         d.callout(M, y, CW, r, titel="Ertragsstruktur", farbe=C["mid"], fill=C["pale"])
 
 
-def seite_ausgangslage(d: Doc, b, k, ch):
+def seite_ausgangslage(d: Doc, b, k, ch, y=None):
     c, kunde = d.c, d.kunde
-    y = d.header(1, "Ausgangslage & System")
+    y = d.kapitel("Ausgangslage & System", y)
     # Auftrag & Objekt
     colw = (CW - 8 * mm) / 2
     adr = (kunde.get("kunde") or {}).get("adresse") or []
@@ -1009,31 +1149,50 @@ def seite_ausgangslage(d: Doc, b, k, ch):
         h2 = d.tabelle(M + colw + 8 * mm, y, colw, rechts) if len(rechts) > 1 else 0
         y -= max(h1, h2) + 6 * mm
 
-    txt = (f"Untersucht wird, wie sich ein Batteriespeicher {am_standort(kunde)} auf Energiekosten, "
-           f"Lastspitzen und zusätzliche Markterlöse auswirkt. Grundlage ist der Lastgang mit einem Jahresverbrauch von "
-           f"{num(b['last_mwh'], 1)} MWh sowie die bestehende PV-Anlage mit {num(b['pv_kwp'])} kWp. Verglichen wird "
-           f"der Betrieb <b>ohne</b> und <b>mit</b> Batteriespeicher über den Zeitraum {b['zeitraum_von']} bis "
-           f"{b['zeitraum_bis']}.")
+    effekte = ["Energiekosten"] if last_da(b) else []
+    if b.get("leistungspreis"):
+        effekte.append("Lastspitzen")
+    effekte.append("zusätzliche Markterlöse")
+    effekte_txt = ", ".join(effekte[:-1]) + (" und " if len(effekte) > 1 else "") + effekte[-1]
+    grundlage = []
+    if last_da(b):
+        grundlage.append(f"der Lastgang mit einem Jahresverbrauch von {num(b['last_mwh'], 1)} MWh")
+    if pv_da(b):
+        grundlage.append(f"die bestehende PV-Anlage mit {num(b['pv_kwp'])} kWp")
+    txt = f"Untersucht wird, wie sich ein Batteriespeicher {am_standort(kunde)} auf {effekte_txt} auswirkt. "
+    if grundlage:
+        txt += "Grundlage ist " + " sowie ".join(grundlage) + ". "
+    txt += (f"Verglichen wird der Betrieb <b>ohne</b> und <b>mit</b> Batteriespeicher über den Zeitraum "
+            f"{b['zeitraum_von']} bis {b['zeitraum_bis']}.")
     y -= para(c, txt, M, y, CW, S(9.4)) + 3 * mm
     y -= img(c, ch["schema"], M + 8 * mm, y, CW - 16 * mm) + 5 * mm
 
     ht, nt = quartalspreise(b.get("ht_preis")), quartalspreise(b.get("nt_preis"))
-    left = [("__h__", "Standort & Verbrauch"),
-            ("Jahresverbrauch", f"{num(b['last_mwh'], 1)} MWh"),
-            ("PV-Anlage (DC)", f"{num(b['pv_kwp'], 1)} kWp"),
-            ("PV-Abregelung bei negativen Preisen", "ja" if (b.get("pv_abschaltung_neg") or "").lower() == "ja" else "nein"),
-            ("Referenzjahr", (b.get("zeitraum_von") or "")[-4:]),
-            ("__h__", "Tarife"),
-            ("Tarifmodell", "Hoch-/Niedertarif" if b.get("tarifschema") == "HT_NT" else (b.get("tarifschema") or "–")),
-            ("Hochtarif-Zeiten", f"{b.get('ht_tage', '')}, {b.get('ht_fenster', '')}")]
-    if ht and nt:
+    left = [("__h__", "Standort & Verbrauch")]
+    left.append(("Jahresverbrauch", f"{num(b['last_mwh'], 1)} MWh" if last_da(b) else "kein Lastgang"))
+    if pv_da(b):
+        left += [("PV-Anlage (DC)", f"{num(b['pv_kwp'], 1)} kWp"),
+                 ("PV-Abregelung bei negativen Preisen",
+                  "ja" if (b.get("pv_abschaltung_neg") or "").lower() == "ja" else "nein")]
+    else:
+        left.append(("PV-Anlage", "keine"))
+    left.append(("Referenzzeitraum" if "bis" in periode(b)["bez"] else "Referenzjahr", periode(b)["kurz"]))
+    schema = (b.get("tarifschema") or "").upper()
+    tarifname = {"HT_NT": "Hoch-/Niedertarif", "SPOT": "Spotpreis (dynamisch)"}.get(schema, b.get("tarifschema") or "–")
+    left += [("__h__", "Tarife"), ("Tarifmodell", tarifname)]
+    if schema == "HT_NT":
+        left.append(("Hochtarif-Zeiten", f"{b.get('ht_tage', '')}, {b.get('ht_fenster', '')}"))
+    if schema == "HT_NT" and ht and nt:
         left += [("__qh__", ("Energiepreis in Rp/kWh", ["Q1", "Q2", "Q3", "Q4"])),
                  ("__q__", ("Hochtarif", [num(v, 1) for v in ht])),
                  ("__q__", ("Niedertarif", [num(v, 1) for v in nt]))]
-    else:
-        left += [("Energiepreis HT", b.get("ht_preis") or "–"), ("Energiepreis NT", b.get("nt_preis") or "–")]
-    left += [("Leistungspreis", f"{num(b['leistungspreis'], 2)} CHF/kW/Monat"),
-             ("Rücklieferung PV / Batterie", f"{b.get('pv_schema', '')} / {b.get('bat_schema', '')}")]
+    elif schema == "HT_NT" and b.get("ht_preis"):
+        left += [("Energiepreis HT", b.get("ht_preis")), ("Energiepreis NT", b.get("nt_preis") or "–")]
+    if b.get("leistungspreis"):
+        left.append(("Leistungspreis", f"{num(b['leistungspreis'], 2)} CHF/kW/Monat"))
+    if pv_da(b):
+        left.append(("Rücklieferung PV", rueckliefer_text(b.get("pv_schema"), b.get("pv_fixtarif"), b.get("pv_floor"))))
+    left.append(("Rücklieferung Batterie", rueckliefer_text(b.get("bat_schema"), b.get("bat_fixtarif"))))
     right = [("__h__", "Batteriespeicher"),
              ("Leistung", f"{num(b['bat_kw'])} kW"),
              ("Kapazität", f"{num(b['bat_kwh'])} kWh"),
@@ -1044,17 +1203,35 @@ def seite_ausgangslage(d: Doc, b, k, ch):
              ("Investition" + (" (Annahme)" if k.investition_abgeleitet else ""), f"ca. {chf(round(k.investition, -2))}"),
              ("Kapitalzins", f"{num(b['kapitalzins_pct'], 1)} % p.a."),
              ("Nutzungsdauer", f"{num(k.lebensdauer_j)} Jahre" if k.lebensdauer_j else "–")]
-    d.tabelle(M, y, colw, left)
-    d.tabelle(M + colw + 8 * mm, y, colw, right)
+    h1 = d.tabelle(M, y, colw, left)
+    h2 = d.tabelle(M + colw + 8 * mm, y, colw, right)
+    return y - max(h1, h2)
 
 
-def seite_methodik(d: Doc, b, k):
+def datengrundlage_text(b):
+    teile = []
+    if last_da(b) and pv_da(b):
+        teile.append("Lastgang und PV-Produktion des Standorts")
+    elif last_da(b):
+        teile.append("Lastgang des Standorts")
+    elif pv_da(b):
+        teile.append("PV-Produktion des Standorts")
+    schema = (b.get("tarifschema") or "").upper()
+    tarif = {"HT_NT": "Hoch-/Niedertarif", "SPOT": "dynamischer Spotpreis-Tarif"}.get(schema, "Stromtarif")
+    teile.append(tarif + (" und Leistungspreis" if b.get("leistungspreis") else ""))
+    teile.append("Preise für die Rücklieferung")
+    teile.append("SRL-Marktpreise des analysierten Zeitraums")
+    return ", ".join(teile[:-1]) + " sowie " + teile[-1] + "."
+
+
+def seite_methodik(d: Doc, b, k, y=None):
     c = d.c
-    y = d.header(2, "Methodik & Vermarktungsmöglichkeiten")
+    y = d.kapitel("Methodik & Vermarktungsmöglichkeiten", y)
     schritte = [
-        ("1", "Datengrundlage", f"Lastgang und PV-Produktion des Standorts, Hoch-/Niedertarif und Leistungspreis, "
-                                f"Spotpreise für die Rücklieferung sowie SRL-Marktpreise {(b.get('zeitraum_von') or '')[-4:]}."),
-        ("2", "Jahressimulation", "Der Batteriebetrieb wird über ein ganzes Jahr simuliert und dem Betrieb ohne "
+        ("1", "Datengrundlage", datengrundlage_text(b)),
+        ("2", "Jahressimulation" if ganzjahr(b) else "Simulation",
+         ("Der Batteriebetrieb wird über ein ganzes Jahr" if ganzjahr(b) else
+          "Der Batteriebetrieb wird über den ganzen Zeitraum") + " simuliert und dem Betrieb ohne "
                                   "Batterie gegenübergestellt. Die Differenz ergibt den Nutzen des Speichers."),
         ("3", "Bewertung", "Erträge je Anwendung, Kosten für Investition, Finanzierung, Unterhalt und Alterung "
                            "sowie Kennzahlen zu Rendite, Amortisation und Risiko."),
@@ -1072,8 +1249,11 @@ def seite_methodik(d: Doc, b, k):
             c.setFillColor(HexColor(C["mid"])); c.setFont("F-B", 14)
             c.drawCentredString(x + bw + 2.5 * mm, y - bh / 2 - 2 * mm, "›")
     y -= bh + 6 * mm
-    txt = ("<b>Betriebsstrategie.</b> Die Batterie bedient zuerst die lokalen Anwendungen am Standort "
-           "(Eigenverbrauch, Lastspitzen). Die dafür nicht benötigte Leistung (Residualflexibilität) wird als "
+    lokal = [n for m_, n in (("Eigenverbrauchsoptimierung", "Eigenverbrauch"), ("Peak-Shaving", "Lastspitzen"))
+             if k.module.get(m_, 0) > 0]
+    txt = ("<b>Betriebsstrategie.</b> Die Batterie bedient zuerst die lokalen Anwendungen am Standort"
+           + (f" ({', '.join(lokal)})" if lokal else "") + ". "
+           "Die dafür nicht benötigte Leistung (Residualflexibilität) wird als "
            f"Sekundärregelleistung vermarktet. Dabei wird der Ladezustand in einem Band von {num(b['soc_min'])} – {num(b['soc_max'])} % gehalten, "
            "damit die Batterie Regelabrufe in beide Richtungen jederzeit erbringen kann und schonend betrieben wird.")
     y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
@@ -1081,15 +1261,19 @@ def seite_methodik(d: Doc, b, k):
     besch = {
         "SRL": "Die Batterie stellt Swissgrid Regelleistung zur Stabilisierung des Stromnetzes bereit. Vergütet werden "
                "die vorgehaltene Leistung und die abgerufene Energie.",
-        "Peak-Shaving": f"Die Batterie entlädt bei hoher Last und senkt so die monatliche Bezugsspitze, die über den "
-                        f"Leistungspreis von {num(b['leistungspreis'], 2)} CHF/kW/Monat verrechnet wird.",
-        "Eigenverbrauchsoptimierung": "Überschüssiger Solarstrom wird gespeichert und später vor Ort genutzt, statt ihn "
+        "Peak-Shaving": "Die Batterie entlädt bei hoher Last und senkt so die monatliche Bezugsspitze, die über den "
+                        + (f"Leistungspreis von {num(b['leistungspreis'], 2)} CHF/kW/Monat verrechnet wird."
+                           if b.get("leistungspreis") else "Leistungspreis verrechnet wird."),
+        "Eigenverbrauchsoptimierung": ("Die Batterie deckt den Verbrauch zu Zeiten hoher Strompreise und wird zu "
+                                       "günstigen Zeiten geladen. Das senkt die Bezugskosten des Standorts.")
+                                      if not pv_da(b) else
+                                      "Überschüssiger Solarstrom wird gespeichert und später vor Ort genutzt, statt ihn "
                                       "einzuspeisen und teureren Netzstrom zu beziehen.",
         "Einspeiseoptimierung": "Solarstrom wird bei tiefen Spotpreisen eingespeichert und zu Zeiten höherer Preise "
                                 "ins Netz zurückgeliefert.",
         "Arbitrage": "Netzstrom wird zu günstigen Zeiten bezogen und zu teureren Zeiten zurückgespeist.",
     }
-    order = sorted(k.module.keys(), key=lambda n: -k.module[n])
+    order = [n for n in sorted(k.module.keys(), key=lambda n: -k.module[n]) if abs(k.module[n]) >= 0.5]
     cw2 = (CW - 5 * mm) / 2
     ch_ = 31 * mm
     for i, n in enumerate(order):
@@ -1120,48 +1304,100 @@ def seite_methodik(d: Doc, b, k):
              "Weitere Regelenergieprodukte (Primär- und Tertiärregelleistung) sowie dynamische Netztarife wurden "
              "nicht bewertet und können zusätzliches Potenzial bieten.",
              x + 5 * mm, yt - 9.5 * mm, cw2 - 9 * mm, S(8.1, C["grey"]))
+    n_karten = len(order) + (len(order) % 2)
+    return y - (n_karten // 2) * (ch_ + 4 * mm) + 4 * mm
 
 
-def seite_wirkung(d: Doc, b, ch, kunde):
+def seite_wirkung(d: Doc, b, ch, kunde, y=None):
+    """Wirkung am Standort. Zeigt nur, was der Bericht liefert (z.B. keine Lastspitzen,
+    wenn Peak-Shaving nicht aktiv ist, kein Eigenverbrauch ohne PV)."""
     c = d.c
-    y = d.header(3, "Wirkung am Standort")
-    txt = ("Die Batterie verändert das Bezugsverhalten des Standorts deutlich: Mehr Solarstrom wird vor Ort genutzt, "
-           "weniger Energie wird aus dem Netz bezogen oder eingespeist und die monatlichen Lastspitzen sinken.")
+    y = d.kapitel("Wirkung am Standort", y)
+    hat = lambda *keys: all(b.get(k) is not None for k in keys)
+    ev, netz, spitze = hat("evq_ohne", "evq_mit") and pv_da(b), hat("netzbezug_ohne", "netzbezug_mit"), \
+        hat("spitze_avg_ohne", "spitze_avg_mit")
+
+    teile = []
+    if ev and b["evq_mit"] > b["evq_ohne"]:
+        teile.append("mehr Solarstrom wird vor Ort genutzt")
+    if netz and b["netzbezug_mit"] < b["netzbezug_ohne"]:
+        teile.append("weniger Energie wird aus dem Netz bezogen")
+    if netz and hat("einspeisung_ohne", "einspeisung_mit") and b["einspeisung_mit"] < b["einspeisung_ohne"]:
+        teile.append("weniger Energie wird eingespeist")
+    if spitze and b["spitze_avg_mit"] < b["spitze_avg_ohne"]:
+        teile.append("die monatlichen Lastspitzen sinken")
+    if teile:
+        satz = ", ".join(teile[:-1]) + (" und " if len(teile) > 1 else "") + teile[-1]
+        txt = f"Die Batterie verändert das Bezugsverhalten des Standorts: {satz[0].upper() + satz[1:]}."
+    else:
+        txt = "Die folgenden Kennzahlen zeigen, wie die Batterie das Bezugsverhalten des Standorts verändert."
     y -= para(c, txt, M, y, CW, S(9.6)) + 5 * mm
-    gap = 4 * mm
-    tw = (CW - 3 * gap) / 4
-    vals = [("Eigenverbrauchsquote", f"{num(b['evq_ohne'])}", f"{num(b['evq_mit'])}", "%"),
-            ("Ø Netzbezug", num(b["netzbezug_ohne"], 1), num(b["netzbezug_mit"], 1), "kW"),
-            ("Ø Netzeinspeisung", num(b["einspeisung_ohne"], 1), num(b["einspeisung_mit"], 1), "kW"),
-            ("Ø Monatsspitze", num(b["spitze_avg_ohne"]), num(b["spitze_avg_mit"]), "kW")]
-    for i, (l, o, m, u) in enumerate(vals):
-        d.vergleich(M + i * (tw + gap), y, tw, 24 * mm, l, o, m, u, True)
-    y -= 31 * mm
-    y = d.h2("Monatliche Lastspitzen", y)
-    if ch.get("spitzen"):
-        y -= img(c, ch["spitzen"], M, y, CW) + 3 * mm
-    red = (1 - b["spitze_avg_mit"] / b["spitze_avg_ohne"]) * 100
-    txt = (f"Die höchste Bezugsleistung pro Monat sinkt im Mittel von {num(b['spitze_avg_ohne'])} kW auf "
-           f"{num(b['spitze_avg_mit'])} kW (−{red:.0f} %), die Jahreshöchstspitze von {num(b['spitze_max_ohne'])} kW auf "
-           f"{num(b['spitze_max_mit'])} kW. Bei einem Leistungspreis von {num(b['leistungspreis'], 2)} CHF/kW/Monat "
-           f"entspricht dies einer Einsparung von <b>{chf(b['einnahmen']['Peak-Shaving'])}</b> pro Jahr.")
-    y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
-    evd = b["evq_mit"] - b["evq_ohne"]
-    txt = (f"<b>Eigenverbrauch.</b> Der Anteil des Solarstroms, der direkt am Standort genutzt wird, steigt um "
-           f"{num(evd)} Prozentpunkte auf {num(b['evq_mit'])} %. Die eingesparten Netzbezugskosten betragen "
-           f"<b>{chf(b['einnahmen']['Eigenverbrauchsoptimierung'])}</b> pro Jahr."
-           + (" Der Effekt bleibt begrenzt, weil der Standort bereits ohne Batterie einen grossen Teil des "
-              "Solarstroms selbst verbraucht." if b["evq_ohne"] >= 60 else ""))
-    y -= para(c, txt, M, y, CW, S(9.4)) + 4 * mm
+
+    vals = []
+    if ev:
+        vals.append(("Eigenverbrauchsquote", num(b["evq_ohne"]), num(b["evq_mit"]), "%"))
+    if netz:
+        vals.append(("Ø Netzbezug", num(b["netzbezug_ohne"], 1), num(b["netzbezug_mit"], 1), "kW"))
+        if hat("einspeisung_ohne", "einspeisung_mit"):
+            vals.append(("Ø Netzeinspeisung", num(b["einspeisung_ohne"], 1), num(b["einspeisung_mit"], 1), "kW"))
+    if spitze:
+        vals.append(("Ø Monatsspitze", num(b["spitze_avg_ohne"]), num(b["spitze_avg_mit"]), "kW"))
+    if vals:
+        gap = 4 * mm
+        tw = (CW - (len(vals) - 1) * gap) / len(vals)
+        for i, (l, o, m, u) in enumerate(vals):
+            d.vergleich(M + i * (tw + gap), y, tw, 24 * mm, l, o, m, u, True)
+        y -= 31 * mm
+
+    if netz and b["netzbezug_mit"] > b["netzbezug_ohne"]:
+        txt = (f"<b>Netzbezug.</b> Der mittlere Netzbezug steigt von {num(b['netzbezug_ohne'], 1)} kW auf "
+               f"{num(b['netzbezug_mit'], 1)} kW. Die Batterie lädt zu Zeiten tiefer Strompreise aus dem Netz und "
+               "gibt die Energie zu teureren Zeiten an den Verbrauch oder das Netz ab. Ein Teil der zusätzlichen "
+               "Energie geht dabei als Lade- und Entladeverlust verloren. Dieser Effekt ist in der "
+               "Wirtschaftlichkeit bereits berücksichtigt.")
+        y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
+    if spitze:
+        y = d.h2("Monatliche Lastspitzen", y)
+        if ch.get("spitzen"):
+            y -= img(c, ch["spitzen"], M, y, CW) + 3 * mm
+        red = (1 - b["spitze_avg_mit"] / b["spitze_avg_ohne"]) * 100 if b["spitze_avg_ohne"] else 0
+        txt = (f"Die höchste Bezugsleistung pro Monat sinkt im Mittel von {num(b['spitze_avg_ohne'])} kW auf "
+               f"{num(b['spitze_avg_mit'])} kW (−{red:.0f} %)")
+        if hat("spitze_max_ohne", "spitze_max_mit"):
+            txt += (f", die Jahreshöchstspitze von {num(b['spitze_max_ohne'])} kW auf "
+                    f"{num(b['spitze_max_mit'])} kW")
+        txt += "."
+        if b.get("leistungspreis") and b["einnahmen"].get("Peak-Shaving"):
+            txt += (f" Bei einem Leistungspreis von {num(b['leistungspreis'], 2)} CHF/kW/Monat entspricht dies "
+                    f"einer Einsparung von <b>{chf(b['einnahmen']['Peak-Shaving'])}</b> pro Jahr.")
+        y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
+
+    if ev:
+        evd = b["evq_mit"] - b["evq_ohne"]
+        txt = "<b>Eigenverbrauch.</b> "
+        if evd > 0:
+            txt += (f"Der Anteil des Solarstroms, der direkt am Standort genutzt wird, steigt um {num(evd)} "
+                    f"Prozentpunkte auf {num(b['evq_mit'])} %.")
+        else:
+            txt += f"Der Anteil des direkt am Standort genutzten Solarstroms liegt bei {num(b['evq_mit'])} %."
+        if b["einnahmen"].get("Eigenverbrauchsoptimierung"):
+            txt += (f" Die eingesparten Netzbezugskosten betragen "
+                    f"<b>{chf(b['einnahmen']['Eigenverbrauchsoptimierung'])}</b> pro Jahr.")
+        if b["evq_ohne"] >= 60 and evd > 0:
+            txt += (" Der Effekt bleibt begrenzt, weil der Standort bereits ohne Batterie einen grossen Teil des "
+                    "Solarstroms selbst verbraucht.")
+        y -= para(c, txt, M, y, CW, S(9.4)) + 4 * mm
     if b.get("wert_pv_abschaltung"):
         para(c, f"Hinweis: Die Abregelung der PV-Anlage bei negativen Strompreisen hat bereits ohne Batterie einen Wert "
                 f"von {chf(b['wert_pv_abschaltung'])} pro Jahr. Dieser Wert ist im Batterienutzen nicht enthalten.",
              M, y, CW, S(8, C["grey"]))
+        y -= 8 * mm
+    return y
 
 
-def seite_wirtschaft(d: Doc, b, k, ch):
+def seite_wirtschaft(d: Doc, b, k, ch, y=None):
     c = d.c
-    y = d.header(4, "Wirtschaftlichkeit")
+    y = d.kapitel("Wirtschaftlichkeit", y)
     txt = ("Die Grafik zeigt, wie sich der jährliche Nettogewinn zusammensetzt: links die Erträge je Anwendung, "
            "rechts die jährlichen Kosten für Unterhalt, Batteriealterung und Finanzierung der Investition.")
     y -= para(c, txt, M, y, CW, S(9.6)) + 3 * mm
@@ -1202,16 +1438,17 @@ def seite_wirtschaft(d: Doc, b, k, ch):
         txt += (" Die <i>Speicherkosten</i> liegen über dem Strompreis. Das ist kein Widerspruch, denn der Grossteil des "
                 "Nutzens entsteht nicht durch zeitlich verschobene Energie, sondern durch vorgehaltene Leistung (SRL) "
                 "und gesenkte Lastspitzen.")
-    para(c, txt, M, y, CW, S(8.4, C["grey"]))
+    y -= para(c, txt, M, y, CW, S(8.4, C["grey"]))
+    return y
 
 
-def seite_risiko(d: Doc, b, k, ch):
+def seite_risiko(d: Doc, b, k, ch, y=None):
     c, kunde = d.c, d.kunde
     lo, hi = kunde.get("sensitivitaet_bereich_pct", [-50, 50])
-    y = d.header(5, "Sensitivität & Risiken")
+    y = d.kapitel("Sensitivität & Risiken", y)
     txt = ("Die Erträge aus Sekundärregelleistung richten sich nach der Entwicklung des Regelleistungsmarkts. "
            "Um die Robustheit der Investition einzuordnen, zeigt die folgende Auswertung Nettogewinn und "
-           f"Amortisationsdauer für ein SRL-Preisniveau zwischen {sgn(lo)} % und {sgn(hi)} % gegenüber 2025.")
+           f"Amortisationsdauer für ein SRL-Preisniveau zwischen {sgn(lo)} % und {sgn(hi)} % gegenüber dem analysierten Zeitraum.")
     y -= para(c, txt, M, y, CW, S(9.6)) + 4 * mm
     y -= img(c, ch["sens"], M, y, CW) + 6 * mm
 
@@ -1227,7 +1464,7 @@ def seite_risiko(d: Doc, b, k, ch):
         hc = HexColor(C["light"]) if basis else HexColor(C["grey"])
         vc = white if basis else HexColor(C["dark"])
         c.setFont("F", 7.5); c.setFillColor(hc)
-        c.drawString(x + 3.5 * mm, y - 6 * mm, "BASIS 2025" if basis else f"SRL-ERLÖSE {sgn(dlt)} %")
+        c.drawString(x + 3.5 * mm, y - 6 * mm, "BASIS" if basis else f"SRL-ERLÖSE {sgn(dlt)} %")
         c.setFont("F-B", 14); c.setFillColor(vc); c.drawString(x + 3.5 * mm, y - 13.5 * mm, num(net))
         c.setFont("F", 7.5); c.setFillColor(hc)
         c.drawString(x + 3.5 * mm, y - 17.5 * mm, "CHF Nettogewinn / Jahr")
@@ -1246,27 +1483,45 @@ def seite_risiko(d: Doc, b, k, ch):
         txt = (f"Innerhalb der betrachteten Bandbreite liegt der Nettogewinn zwischen {chf(net_lo)} und "
                f"{chf(net_hi)} pro Jahr, die Amortisationsdauer zwischen {num(pb_hi, 1)} und {num(pb_lo, 1)} Jahren.")
     y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
-    txt = ("<b>Weitere Einflussfaktoren.</b> Die Berechnung basiert auf einem historischen Jahr (Lastgang, Preise). "
+    txt = ("<b>Weitere Einflussfaktoren.</b> Die Berechnung basiert auf historischen Daten (Lastgang, Preise). "
            "Abweichungen ergeben sich insbesondere durch Veränderungen im Verbrauchsverhalten, bei Netz- und "
            "Energietarifen, durch Ausfallzeiten der Anlage sowie durch die tatsächliche Alterung der Batterie.")
-    para(c, txt, M, y, CW, S(8.6, C["grey"]))
+    y -= para(c, txt, M, y, CW, S(8.6, C["grey"]))
+    return y
 
 
-def seite_dimensionierung(d: Doc, b, sz, ch):
+def seite_dimensionierung(d: Doc, b, sz, ch, y=None):
     c = d.c
-    y = d.header(6, "Dimensionierung")
+    y = d.kapitel("Dimensionierung", y)
     txt = (f"Um die passende Batteriegrösse zu bestimmen, wurden {len(sz['df'])} Varianten mit "
            f"{len(sz['caps'])} Kapazitäten ({num(min(sz['caps']))} – {num(max(sz['caps']))} kWh) und "
            f"{len(sz['rates'])} Leistungsverhältnissen (C-Rate) gerechnet. Die C-Rate gibt an, wie gross die Leistung im "
            f"Verhältnis zur Kapazität ist: 1C bedeutet z. B. 300 kW bei 300 kWh.")
     y -= para(c, txt, M, y, CW, S(9.6)) + 2 * mm
     y -= img(c, ch["heat"], M, y, CW) + 2 * mm
-    lg = (f"<b>R</b> = höchste Kapitalverzinsung ({cfg_label(sz['best_roi'])})   ·   "
-          f"<b>A</b> = ausgewogen, höchster Gewinn bei mind. {sz['ziel_roi']:g} % Verzinsung "
-          f"({cfg_label(sz['ausgewogen'])})   ·   <b>E</b> = höchster Nettogewinn ({cfg_label(sz['best_net'])})")
+    texte = {"R": "höchste Kapitalverzinsung",
+             "A": f"ausgewogen, höchster Gewinn bei mind. {sz['ziel_roi']:g} % Verzinsung",
+             "E": "höchster Nettogewinn" + (f", erreicht auch mind. {sz['ziel_roi']:g} % Verzinsung"
+                                          if sz["a_gleich_e"] else "")}
+    lg = "   ·   ".join(f"<b>{t}</b> = {texte[t]} ({cfg_label(r)})" for t, r in varianten(sz))
+    if sz["netz_begrenzt"]:
+        lg += (f"<br/>Grau: Leistung über dem Netzanschluss von {num(sz['p_max'])} kW, "
+               "in der Auswahl nicht berücksichtigt.")
     y -= para(c, lg, M, y, CW, S(8, C["grey"])) + 5 * mm
     y = d.h2("Rendite und Gewinn im Vergleich", y)
     y -= img(c, ch["trade"], M, y, CW)
+    return y
+
+
+def nebeneffekte_text(b, k):
+    eff = []
+    if b.get("leistungspreis") and k.module.get("Peak-Shaving", 0) > 0:
+        eff.append("senkt die Lastspitzen des Standorts")
+    if pv_da(b) and k.module.get("Eigenverbrauchsoptimierung", 0) > 0:
+        eff.append("erhöht den Anteil des selbst genutzten Solarstroms")
+    if not eff:
+        return ""
+    return " Neben dem finanziellen Ertrag " + " und ".join(eff) + " der Speicher."
 
 
 def kernaussagen(d: Doc, b, k, kunde, y):
@@ -1285,17 +1540,21 @@ def kernaussagen(d: Doc, b, k, kunde, y):
          f"{MODUL_LANG[top[0][0]]} ({k.anteile[top[0][0]]:.0f} %)"
          + (f" und {MODUL_LANG[top[1][0]]} ({k.anteile[top[1][0]]:.0f} %)." if len(top) > 1 else ".")),
     ]
-    if b.get("spitze_avg_ohne") is not None:
-        items.append(("Wirkung am Standort",
-                      f"Die mittlere Monatsspitze sinkt von {num(b['spitze_avg_ohne'])} kW auf "
-                      f"{num(b['spitze_avg_mit'])} kW. Die Eigenverbrauchsquote steigt von {num(b['evq_ohne'])} % auf "
-                      f"{num(b['evq_mit'])} %."))
+    wirkung = []
+    if b.get("spitze_avg_ohne") is not None and b.get("spitze_avg_mit") is not None:
+        wirkung.append(f"Die mittlere Monatsspitze sinkt von {num(b['spitze_avg_ohne'])} kW auf "
+                       f"{num(b['spitze_avg_mit'])} kW.")
+    if b.get("evq_ohne") is not None and b.get("evq_mit") is not None and pv_da(b):
+        wirkung.append(f"Die Eigenverbrauchsquote liegt mit Batterie bei {num(b['evq_mit'])} % "
+                       f"(ohne {num(b['evq_ohne'])} %).")
+    if wirkung:
+        items.append(("Wirkung am Standort", " ".join(wirkung)))
     if k.srl > 0:
         items.append(("Robustheit",
-                      f"Auch bei SRL-Erlösen, die {abs(lo):.0f} % unter dem Niveau von 2025 liegen, beträgt der "
+                      f"Auch bei SRL-Erlösen, die {abs(lo):.0f} % tiefer liegen als im analysierten Zeitraum, beträgt der "
                       f"Nettogewinn {chf(net_lo)} pro Jahr bei einer Amortisationsdauer von {num(pb_lo, 1)} Jahren."
                       if net_lo > 0 else
-                      f"Bei SRL-Erlösen, die {abs(lo):.0f} % unter dem Niveau von 2025 liegen, beträgt der "
+                      f"Bei SRL-Erlösen, die {abs(lo):.0f} % tiefer liegen als im analysierten Zeitraum, beträgt der "
                       f"Nettogewinn {chf(net_lo)} pro Jahr."))
     gap = 4 * mm
     cw2 = (CW - gap) / 2
@@ -1311,10 +1570,10 @@ def kernaussagen(d: Doc, b, k, kunde, y):
     return y - rows * (h + gap) - 4 * mm
 
 
-def seite_empfehlung(d: Doc, b, k, sz, kunde):
+def seite_empfehlung(d: Doc, b, k, sz, kunde, y=None):
     c = d.c
     nr = 7 if sz is not None else 6
-    y = d.header(nr, "Empfehlung & Fazit" if sz is not None else "Fazit")
+    y = d.kapitel("Empfehlung & Fazit" if sz is not None else "Fazit", y)
     df = sz["df"] if sz is not None else None
     if sz is not None:
         punkte = []
@@ -1323,13 +1582,27 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde):
                           f"{sz['dominante_crate']:g}C den höchsten Gewinn. Die SRL-Erlöse skalieren vor allem mit der "
                           f"vorgehaltenen Leistung (kW). Zusätzliche Kapazität ohne zusätzliche Leistung bringt deshalb nur "
                           f"wenig Mehrertrag.")
-        roi_small = df[df.kapazitaet_kwh == min(sz["caps"])].roi_pct.max()
-        roi_big = df[df.kapazitaet_kwh == max(sz["caps"])].roi_pct.max()
-        punkte.append(f"<b>Grösser heisst mehr Gewinn, aber tiefere Verzinsung.</b> Die Kapitalverzinsung sinkt mit "
-                      f"zunehmender Grösse von {roi_small:.0f} % auf {roi_big:.0f} %. Der Grund: Schon ein kleiner Speicher "
-                      f"deckt einen grossen Teil des Nutzens aus Eigenverbrauch und Peak-Shaving ab. Jede zusätzliche "
-                      f"Kilowattstunde wird deshalb vor allem für die SRL-Vermarktung eingesetzt. Damit steigt mit der "
-                      f"Grösse auch der Anteil des Ertrags, der von den Regelleistungspreisen abhängt.")
+        # Verzinsung entlang der Empfehlung: rendite-optimierte vs. ertrags-maximierte Variante
+        roi_small, roi_big = sz["best_roi"].roi_pct, sz["best_net"].roi_pct
+        lokal = [n for key, n in (("Eigenverbrauchsoptimierung", "Eigenverbrauch"), ("Peak-Shaving", "Peak-Shaving"))
+                 if k.module.get(key, 0) > 0]
+        if roi_small - roi_big >= 3:
+            txt = (f"<b>Grösser heisst mehr Gewinn, aber tiefere Verzinsung.</b> Die Kapitalverzinsung sinkt mit "
+                   f"zunehmender Grösse von {roi_small:.0f} % auf {roi_big:.0f} %.")
+            if lokal:
+                txt += (f" Der Grund: Schon ein kleiner Speicher deckt einen grossen Teil des Nutzens aus "
+                        f"{' und '.join(lokal)} ab. Jede zusätzliche Kilowattstunde wird deshalb vor allem für die "
+                        "SRL-Vermarktung eingesetzt.")
+            txt += " Damit steigt mit der Grösse auch der Anteil des Ertrags, der von den Regelleistungspreisen abhängt."
+        else:
+            txt = (f"<b>Die Verzinsung hängt kaum von der Grösse ab.</b> Sie liegt zwischen {roi_big:.0f} % und "
+                   f"{roi_small:.0f} %, weil der Ertrag vor allem aus der SRL-Vermarktung stammt und mit der Leistung "
+                   "fast proportional wächst. Mit der Grösse steigen deshalb Gewinn, Investition und die Abhängigkeit "
+                   "von den Regelleistungspreisen im gleichen Mass.")
+        punkte.append(txt)
+        if sz["netz_begrenzt"]:
+            punkte.append(f"<b>Netzanschluss.</b> {sz['ausgeschlossen']} Varianten benötigen mehr Leistung als der "
+                          f"Netzanschluss von {num(sz['p_max'])} kW zulässt. Sie sind in der Auswahl nicht berücksichtigt.")
         if len(sz["negative"]):
             neg = sz["negative"]
             punkte.append(f"<b>Zu wenig Leistung lohnt sich nicht.</b> "
@@ -1344,16 +1617,22 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde):
             c.setFillColor(HexColor(C["mid"])); c.circle(M + 1.5 * mm, y - 2.3 * mm, 1.1 * mm, fill=1, stroke=0)
             y -= para(c, p, M + 5 * mm, y, CW - 5 * mm, S(9)) + 2 * mm
         y -= 2 * mm
-        y = d.h2("Drei Varianten zur Auswahl", y)
+        info = {"R": ("Rendite-optimiert", "Kleine Investition mit der höchsten Verzinsung und dem geringsten "
+                                           "absoluten Marktrisiko."),
+                "A": ("Ausgewogen", f"Hoher Gewinn bei einer Verzinsung von mindestens {sz['ziel_roi']:g} %."),
+                "E": ("Ertrags-maximiert", "Höchster absoluter Gewinn bei der grössten Abhängigkeit von den SRL-Preisen."
+                      if not sz["a_gleich_e"] else
+                      f"Höchster absoluter Gewinn und zugleich mindestens {sz['ziel_roi']:g} % Verzinsung.")}
+        karten = [(t, info[t][0], r, info[t][1]) for t, r in varianten(sz)]
+        hero_tag = "A" if any(t == "A" for t, *_ in karten) else "E"
+        anz = {1: "Empfohlene Variante", 2: "Zwei Varianten zur Auswahl", 3: "Drei Varianten zur Auswahl"}[len(karten)]
+        y = d.h2(anz, y)
         gap = 4 * mm
-        tw = (CW - 2 * gap) / 3
+        tw = (CW - (len(karten) - 1) * gap) / len(karten)
         h = 49 * mm
-        karten = [("R", "Rendite-optimiert", sz["best_roi"], "Kleine Investition mit der höchsten Verzinsung und dem geringsten absoluten Marktrisiko."),
-                  ("A", "Ausgewogen", sz["ausgewogen"], f"Hoher Gewinn bei einer Verzinsung von mindestens {sz['ziel_roi']:g} %."),
-                  ("E", "Ertrags-maximiert", sz["best_net"], "Höchster absoluter Gewinn bei der grössten Abhängigkeit von den SRL-Preisen.")]
         for i, (tag, titel, row, besch) in enumerate(karten):
             x = M + i * (tw + gap)
-            hero = tag == "A"
+            hero = tag == hero_tag
             rrect(c, x, y - h, tw, h, 3 * mm, fill=C["dark"] if hero else C["bg"])
             fc = white if hero else HexColor(C["ink"])
             gc = HexColor(C["light"]) if hero else HexColor(C["grey"])
@@ -1373,7 +1652,7 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde):
             para(c, besch, x + 4 * mm, y - 36.5 * mm, tw - 8 * mm, S(7.6, C["light"] if hero else C["grey"]))
         y -= h + 5 * mm
 
-    jahr = (b.get('zeitraum_von') or '')[-4:]
+    jahr = periode(b)["phrase"]
     if sz is None:
         y = kernaussagen(d, b, k, kunde, y)
     y = d.h2("Fazit", y)
@@ -1390,11 +1669,11 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde):
         fazit_auto = (
             f"Ein Batteriespeicher mit {num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh ist {am_standort(kunde)} "
             f"unter den Marktbedingungen {jahr} {bewertung}. Er erzielt einen Nettogewinn von {chf(b['netto'])} pro "
-            f"Jahr und amortisiert sich in {num(b['amortisationsdauer_j'], 1)} Jahren. Neben dem finanziellen Ertrag "
-            f"senkt der Speicher die Lastspitzen des Standorts und erhöht den Anteil des selbst genutzten Solarstroms.")
+            f"Jahr und amortisiert sich in {num(b['amortisationsdauer_j'], 1)} Jahren."
+            + nebeneffekte_text(b, k))
     fazit = kunde.get("texte", {}).get("fazit") or fazit_auto
     y -= para(c, fazit, M, y, CW, S(9.2)) + 4 * mm
-    hinweis = (f"Alle Ergebnisse beruhen auf historischen Daten des Jahres {(b.get('zeitraum_von') or '')[-4:]} "
+    hinweis = (f"Alle Ergebnisse beruhen auf historischen Daten {periode(b)['phrase']} "
                "(Lastgang, Strom- und Regelleistungspreise). Sie zeigen, was der Speicher unter diesen Bedingungen "
                "erwirtschaftet hätte. Zukünftige Erträge können davon abweichen. Die Ergebnisse sind deshalb keine "
                "Garantie für die Wirtschaftlichkeit in den kommenden Jahren.")
@@ -1416,10 +1695,6 @@ def abschluss_block(d: Doc, kunde):
     c = d.c
     y0 = 20 * mm
     rrect(c, M, y0, CW, KONTAKT_H, 3 * mm, fill=C["pale"])
-    il = ASSETS / "fleco_illustration.png"
-    if il.exists():
-        iw = 68 * mm
-        img(c, il, M + CW - iw - 3 * mm, y0 + KONTAKT_H - 2.5 * mm, iw)
     c.setFont("F-B", 11); c.setFillColor(HexColor(C["dark"]))
     c.drawString(M + 6 * mm, y0 + KONTAKT_H - 8 * mm, "Bei Fragen stehen wir Ihnen jederzeit gerne zur Verfügung.")
     k = kunde.get("kontakt", {})
@@ -1434,7 +1709,7 @@ ABSCHLUSS_RESERVE = 20 * mm + KONTAKT_H + 19 * mm
 
 
 def seite_hinweise(d: Doc, kunde):
-    d.header(d.kapitel + 1, "Hinweise & Kontakt")
+    d.kapitel("Hinweise & Kontakt")
     abschluss_block(d, kunde)
 
 
@@ -1447,11 +1722,12 @@ def build(bericht, sweep, kunde_json, out):
     import tempfile, shutil
     tmp = Path(tempfile.mkdtemp(prefix="fleco_charts_"))  # Grafiken nur temporär
 
-    kunde = bereinige_kundendaten(json.loads(Path(kunde_json).read_text(encoding="utf-8")))
+    kunde = bereinige_kundendaten(lade_kunden_json(kunde_json))
     b = parse_bericht(bericht)
     k = kennzahlen(b, kunde)
     df = parse_sweep(sweep) if sweep else None
-    sz = sizing(df, kunde.get("ziel_kapitalverzinsung_pct", 15)) if df is not None else None
+    sz = (sizing(df, kunde.get("ziel_kapitalverzinsung_pct", 15), netzanschluss_kw(b, kunde))
+          if df is not None else None)
     kunde["_hat_sweep"] = sz is not None
     if sz is not None:
         sz["detail_konsistent"] = detail_konsistent(b, sz)
@@ -1471,7 +1747,7 @@ def build(bericht, sweep, kunde_json, out):
         "donut": chart_donut(k, tmp / "donut.png", b),
         "waterfall": chart_waterfall(b, k, tmp / "waterfall.png"),
         "sens": chart_sensitivitaet(b, k, tmp / "sens.png", tuple(kunde.get("sensitivitaet_bereich_pct", [-50, 50]))),
-        "schema": chart_schema(b, tmp / "schema.png"),
+        "schema": chart_schema(b, k, tmp / "schema.png"),
     }
     if kunde.get("monatsspitzen_ohne_kw") and kunde.get("monatsspitzen_mit_kw"):
         ch["spitzen"] = chart_lastspitzen(kunde["monatsspitzen_ohne_kw"], kunde["monatsspitzen_mit_kw"],
@@ -1480,30 +1756,53 @@ def build(bericht, sweep, kunde_json, out):
         ch["heat"] = chart_heatmaps(sz, tmp / "heat.png")
         ch["trade"] = chart_tradeoff(sz, b, tmp / "trade.png")
 
+    import io
+    # Abschnitte im Fluss: ein Abschnitt beginnt auf der laufenden Seite, wenn er dort ganz Platz hat.
+    abschnitte = [lambda d, y: seite_ausgangslage(d, b, k, ch, y),
+                  lambda d, y: seite_methodik(d, b, k, y),
+                  lambda d, y: seite_wirkung(d, b, ch, kunde, y),
+                  lambda d, y: seite_wirtschaft(d, b, k, ch, y),
+                  lambda d, y: seite_risiko(d, b, k, ch, y)]
+    if sz is not None:
+        abschnitte.append(lambda d, y: seite_dimensionierung(d, b, sz, ch, y))
+    fazit = lambda d, y: seite_empfehlung(d, b, k, sz, kunde, y)
+
+    def hoehe(f):
+        """Höhe eines Abschnitts durch Probe-Zeichnen auf einer Schmierseite."""
+        sd = Doc(io.BytesIO(), kunde, b)
+        sd.total = 0
+        sd.new_page()
+        return Doc.TOP - f(sd, Doc.TOP)
+
+    hoehen = [hoehe(f) for f in abschnitte]
+    h_fazit = hoehe(fazit) + (ABSCHLUSS_RESERVE - Doc.BOTTOM)   # Fazit möglichst mit Kontaktbox
+    ABSTAND = 12 * mm
+
     def render(target, total):
         d = Doc(target, kunde, b)
         d.total = total
-        seiten = [lambda: seite_titel(d, b, k, sz, ch),
-                  lambda: seite_ausgangslage(d, b, k, ch),
-                  lambda: seite_methodik(d, b, k),
-                  lambda: seite_wirkung(d, b, ch, kunde),
-                  lambda: seite_wirtschaft(d, b, k, ch),
-                  lambda: seite_risiko(d, b, k, ch)]
-        if sz is not None:
-            seiten.append(lambda: seite_dimensionierung(d, b, sz, ch))
-        for f in seiten:
-            d.new_page(); f(); d.footer()
-        d.new_page()
-        y_end = seite_empfehlung(d, b, k, sz, kunde)
-        if y_end >= ABSCHLUSS_RESERVE:
+        d.new_page(); seite_titel(d, b, k, sz, ch); d.footer()
+
+        def neue_seite():
+            d.new_page(); d.seitenkopf()
+            return Doc.TOP
+
+        y = neue_seite()
+        for f, h in list(zip(abschnitte, hoehen)) + [(fazit, h_fazit)]:
+            if y < Doc.TOP:                                  # Seite enthält schon einen Abschnitt
+                if y - ABSTAND - h < Doc.BOTTOM:
+                    d.footer(); y = neue_seite()
+                else:
+                    y -= ABSTAND
+            y = f(d, y)
+        if y >= ABSCHLUSS_RESERVE:
             abschluss_block(d, kunde)
             d.footer()
         else:
-            d.footer(); d.new_page(); seite_hinweise(d, kunde); d.footer()
+            d.footer(); neue_seite(); seite_hinweise(d, kunde); d.footer()
         d.c.save()
         return d.page
 
-    import io
     n = render(io.BytesIO(), 0)
     render(str(out), n)
     shutil.rmtree(tmp, ignore_errors=True)
