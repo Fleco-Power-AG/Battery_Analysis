@@ -49,6 +49,24 @@ if not exist "%SETUP%\conda_aktivieren.bat" (
 call "%SETUP%\conda_aktivieren.bat"
 if errorlevel 1 goto :ende
 
+rem ---- Pakete fuer Kundenbericht und PV-Standortprofil pruefen, BEVOR lange gerechnet wird ------
+python -c "import reportlab, pdfplumber, pvlib" >nul 2>nul
+if not errorlevel 1 goto :pakete_ok
+echo.
+echo [HINWEIS] Fuer Kundenbericht bzw. PV-Standortprofil fehlen Python-Pakete: reportlab, pdfplumber, pvlib
+choice /C JN /M "Jetzt im Environment installieren"
+if errorlevel 2 goto :ende
+python -m pip install reportlab pdfplumber pvlib
+python -c "import reportlab, pdfplumber, pvlib" >nul 2>nul
+if errorlevel 1 (
+    echo [FEHLER] Installation fehlgeschlagen. Bitte im Anaconda Prompt ausfuehren:
+    echo          conda activate batterieanalyse
+    echo          pip install reportlab pdfplumber pvlib
+    goto :ende
+)
+echo [OK] Pakete installiert.
+:pakete_ok
+
 rem ---------------------------------------------------------- Inputs-Datei ---
 set "INPUT=%~1"
 if defined INPUT goto :input_da
@@ -112,6 +130,16 @@ echo        Auftraggeber, Projekt, Standort und Datum ausfuellen, speichern und
 echo        Notepad schliessen. Danach geht es automatisch weiter.
 start /wait notepad "%KUNDE%"
 :kunde_da
+rem ---- Kunden-JSON vor den Rechnungen auf Formfehler pruefen ------------------
+:kunde_pruefen
+python -c "import sys;sys.path.insert(0,sys.argv[1]);import fleco_kundenreport as f;f.lade_kunden_json(sys.argv[2])" "%CODE%" "%KUNDE%"
+if not errorlevel 1 goto :kunde_ok
+echo.
+choice /C JN /M "Kunden-JSON jetzt in Notepad korrigieren"
+if errorlevel 2 goto :ende
+start /wait notepad "%KUNDE%"
+goto :kunde_pruefen
+:kunde_ok
 
 rem --------------------------------------------------------------- Ablauf -----
 choice /C JN /M "1) Batterieanalyse neu rechnen"

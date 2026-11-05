@@ -190,6 +190,7 @@ def parse_bericht(path) -> dict:
     b["pv_fixtarif"] = _rx(r"PV-Fixtarif\s+" + NUM + r"\s*CHF/kWh", t)
     b["pv_floor"] = _rx(r"PV-Floor\s+" + NUM + r"\s*CHF/kWh", t)
     b["bat_fixtarif"] = _rx(r"Batterie-Fixtarif\s+" + NUM + r"\s*CHF/kWh", t)
+    b["pv_profil"] = _rx(r"^PV-Profil\s+(.+)$", t, cast=str)
     b["pv_kwp"] = _rx(r"DC-Leistung\s+" + NUM + r"\s*kWp", t)
     b["pv_abschaltung_neg"] = _rx(r"Abschaltung bei Negativpreisen\s+(\S+)", t, cast=str)
     b["bat_kw"] = _rx(r"Batteriespeicher\s+" + NUM + r"\s*kW\s*/", t)
@@ -1012,6 +1013,18 @@ def rueckliefer_text(schema, fixtarif=None, floor=None):
     return schema or "–"
 
 
+def bezug_moeglich(b):
+    """Netzbezug am Standort zulässig? (Netz-Grenzen Standort: Einspeisung / Bezug)."""
+    werte = re.findall(r"[\d'’.,]+(?=\s*kW)", b.get("netz_standort") or "")
+    return _f(werte[1]) > 0 if len(werte) >= 2 else True
+
+
+def peak_relevant(b):
+    """Lastspitzen/Peak-Shaving sind nur ein Thema, wenn die Batterie hinter dem Zähler eines
+    Verbrauchers sitzt (Lastgang), ein Leistungspreis gilt und Netzbezug zulässig ist."""
+    return last_da(b) and bool(b.get("leistungspreis")) and bezug_moeglich(b)
+
+
 def cfg_label(row):
     return f"{num(row.kapazitaet_kwh)} kWh / {num(row.leistung_kw)} kW"
 
@@ -1150,7 +1163,7 @@ def seite_ausgangslage(d: Doc, b, k, ch, y=None):
         y -= max(h1, h2) + 6 * mm
 
     effekte = ["Energiekosten"] if last_da(b) else []
-    if b.get("leistungspreis"):
+    if peak_relevant(b):
         effekte.append("Lastspitzen")
     effekte.append("zusätzliche Markterlöse")
     effekte_txt = ", ".join(effekte[:-1]) + (" und " if len(effekte) > 1 else "") + effekte[-1]
@@ -1171,6 +1184,13 @@ def seite_ausgangslage(d: Doc, b, k, ch, y=None):
     left = [("__h__", "Standort & Verbrauch")]
     left.append(("Jahresverbrauch", f"{num(b['last_mwh'], 1)} MWh" if last_da(b) else "kein Lastgang"))
     if pv_da(b):
+        quelle = (b.get("pv_profil") or "").lower()
+        if quelle.startswith("standortprofil"):
+            m = re.search(r"MeteoSwiss\s+(\w+)\s*\((\d+)\s*km\)", b["pv_profil"])
+            left.append(("PV-Erzeugung", f"berechnet, Wetterstation {m.group(1)} ({m.group(2)} km)" if m
+                         else "berechnet aus MeteoSwiss-Messdaten"))
+        elif quelle.startswith("messprofil"):
+            left.append(("PV-Erzeugung", "gemessenes Profil"))
         left += [("PV-Anlage (DC)", f"{num(b['pv_kwp'], 1)} kWp"),
                  ("PV-Abregelung bei negativen Preisen",
                   "ja" if (b.get("pv_abschaltung_neg") or "").lower() == "ja" else "nein")]
@@ -1179,7 +1199,9 @@ def seite_ausgangslage(d: Doc, b, k, ch, y=None):
     left.append(("Referenzzeitraum" if "bis" in periode(b)["bez"] else "Referenzjahr", periode(b)["kurz"]))
     schema = (b.get("tarifschema") or "").upper()
     tarifname = {"HT_NT": "Hoch-/Niedertarif", "SPOT": "Spotpreis (dynamisch)"}.get(schema, b.get("tarifschema") or "–")
-    left += [("__h__", "Tarife"), ("Tarifmodell", tarifname)]
+    left.append(("__h__", "Tarife"))
+    if b.get("tarifschema"):
+        left.append(("Tarifmodell", tarifname))
     if schema == "HT_NT":
         left.append(("Hochtarif-Zeiten", f"{b.get('ht_tage', '')}, {b.get('ht_fenster', '')}"))
     if schema == "HT_NT" and ht and nt:
@@ -1188,7 +1210,7 @@ def seite_ausgangslage(d: Doc, b, k, ch, y=None):
                  ("__q__", ("Niedertarif", [num(v, 1) for v in nt]))]
     elif schema == "HT_NT" and b.get("ht_preis"):
         left += [("Energiepreis HT", b.get("ht_preis")), ("Energiepreis NT", b.get("nt_preis") or "–")]
-    if b.get("leistungspreis"):
+    if peak_relevant(b):
         left.append(("Leistungspreis", f"{num(b['leistungspreis'], 2)} CHF/kW/Monat"))
     if pv_da(b):
         left.append(("Rücklieferung PV", rueckliefer_text(b.get("pv_schema"), b.get("pv_fixtarif"), b.get("pv_floor"))))
@@ -1218,7 +1240,8 @@ def datengrundlage_text(b):
         teile.append("PV-Produktion des Standorts")
     schema = (b.get("tarifschema") or "").upper()
     tarif = {"HT_NT": "Hoch-/Niedertarif", "SPOT": "dynamischer Spotpreis-Tarif"}.get(schema, "Stromtarif")
-    teile.append(tarif + (" und Leistungspreis" if b.get("leistungspreis") else ""))
+    if b.get("tarifschema"):
+        teile.append(tarif + (" und Leistungspreis" if peak_relevant(b) else ""))
     teile.append("Preise für die Rücklieferung")
     teile.append("SRL-Marktpreise des analysierten Zeitraums")
     return ", ".join(teile[:-1]) + " sowie " + teile[-1] + "."
@@ -1314,8 +1337,10 @@ def seite_wirkung(d: Doc, b, ch, kunde, y=None):
     c = d.c
     y = d.kapitel("Wirkung am Standort", y)
     hat = lambda *keys: all(b.get(k) is not None for k in keys)
-    ev, netz, spitze = hat("evq_ohne", "evq_mit") and pv_da(b), hat("netzbezug_ohne", "netzbezug_mit"), \
-        hat("spitze_avg_ohne", "spitze_avg_mit")
+    ev = hat("evq_ohne", "evq_mit") and pv_da(b) and last_da(b)
+    netz = hat("netzbezug_ohne", "netzbezug_mit") and (
+        last_da(b) or max(b["netzbezug_ohne"], b["netzbezug_mit"]) > 0.05)
+    spitze = hat("spitze_avg_ohne", "spitze_avg_mit") and peak_relevant(b)
 
     teile = []
     if ev and b["evq_mit"] > b["evq_ohne"]:
@@ -1330,7 +1355,8 @@ def seite_wirkung(d: Doc, b, ch, kunde, y=None):
         satz = ", ".join(teile[:-1]) + (" und " if len(teile) > 1 else "") + teile[-1]
         txt = f"Die Batterie verändert das Bezugsverhalten des Standorts: {satz[0].upper() + satz[1:]}."
     else:
-        txt = "Die folgenden Kennzahlen zeigen, wie die Batterie das Bezugsverhalten des Standorts verändert."
+        txt = ("Die folgenden Kennzahlen zeigen, wie die Batterie das "
+               + ("Bezugsverhalten" if last_da(b) else "Einspeiseverhalten") + " des Standorts verändert.")
     y -= para(c, txt, M, y, CW, S(9.6)) + 5 * mm
 
     vals = []
@@ -1367,7 +1393,7 @@ def seite_wirkung(d: Doc, b, ch, kunde, y=None):
             txt += (f", die Jahreshöchstspitze von {num(b['spitze_max_ohne'])} kW auf "
                     f"{num(b['spitze_max_mit'])} kW")
         txt += "."
-        if b.get("leistungspreis") and b["einnahmen"].get("Peak-Shaving"):
+        if peak_relevant(b) and b["einnahmen"].get("Peak-Shaving"):
             txt += (f" Bei einem Leistungspreis von {num(b['leistungspreis'], 2)} CHF/kW/Monat entspricht dies "
                     f"einer Einsparung von <b>{chf(b['einnahmen']['Peak-Shaving'])}</b> pro Jahr.")
         y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
@@ -1436,8 +1462,8 @@ def seite_wirtschaft(d: Doc, b, k, ch, y=None):
            "Investition.")
     if b.get("lcos_rp") and b["lcos_rp"] > 25:
         txt += (" Die <i>Speicherkosten</i> liegen über dem Strompreis. Das ist kein Widerspruch, denn der Grossteil des "
-                "Nutzens entsteht nicht durch zeitlich verschobene Energie, sondern durch vorgehaltene Leistung (SRL) "
-                "und gesenkte Lastspitzen.")
+                "Nutzens entsteht nicht durch zeitlich verschobene Energie, sondern durch vorgehaltene Leistung (SRL)"
+                + (" und gesenkte Lastspitzen" if k.module.get("Peak-Shaving", 0) > 0 else "") + ".")
     y -= para(c, txt, M, y, CW, S(8.4, C["grey"]))
     return y
 
@@ -1483,9 +1509,11 @@ def seite_risiko(d: Doc, b, k, ch, y=None):
         txt = (f"Innerhalb der betrachteten Bandbreite liegt der Nettogewinn zwischen {chf(net_lo)} und "
                f"{chf(net_hi)} pro Jahr, die Amortisationsdauer zwischen {num(pb_hi, 1)} und {num(pb_lo, 1)} Jahren.")
     y -= para(c, txt, M, y, CW, S(9.4)) + 6 * mm
-    txt = ("<b>Weitere Einflussfaktoren.</b> Die Berechnung basiert auf historischen Daten (Lastgang, Preise). "
-           "Abweichungen ergeben sich insbesondere durch Veränderungen im Verbrauchsverhalten, bei Netz- und "
-           "Energietarifen, durch Ausfallzeiten der Anlage sowie durch die tatsächliche Alterung der Batterie.")
+    faktoren = (["Veränderungen im Verbrauchsverhalten"] if last_da(b) else []) \
+        + (["abweichende Solarerträge"] if pv_da(b) else []) \
+        + ["Veränderungen bei Netz- und Energietarifen", "Ausfallzeiten der Anlage", "die tatsächliche Alterung der Batterie"]
+    txt = (f"<b>Weitere Einflussfaktoren.</b> Die Berechnung basiert auf historischen Daten ({datenarten(b)}). "
+           "Abweichungen ergeben sich insbesondere durch " + ", ".join(faktoren[:-1]) + " sowie " + faktoren[-1] + ".")
     y -= para(c, txt, M, y, CW, S(8.6, C["grey"]))
     return y
 
@@ -1513,9 +1541,19 @@ def seite_dimensionierung(d: Doc, b, sz, ch, y=None):
     return y
 
 
+def datenarten(b):
+    teile = []
+    if last_da(b):
+        teile.append("Lastgang")
+    if pv_da(b):
+        teile.append("PV-Produktion")
+    teile.append("Strom- und Regelleistungspreise")
+    return ", ".join(teile)
+
+
 def nebeneffekte_text(b, k):
     eff = []
-    if b.get("leistungspreis") and k.module.get("Peak-Shaving", 0) > 0:
+    if peak_relevant(b) and k.module.get("Peak-Shaving", 0) > 0:
         eff.append("senkt die Lastspitzen des Standorts")
     if pv_da(b) and k.module.get("Eigenverbrauchsoptimierung", 0) > 0:
         eff.append("erhöht den Anteil des selbst genutzten Solarstroms")
@@ -1541,10 +1579,10 @@ def kernaussagen(d: Doc, b, k, kunde, y):
          + (f" und {MODUL_LANG[top[1][0]]} ({k.anteile[top[1][0]]:.0f} %)." if len(top) > 1 else ".")),
     ]
     wirkung = []
-    if b.get("spitze_avg_ohne") is not None and b.get("spitze_avg_mit") is not None:
+    if b.get("spitze_avg_ohne") is not None and b.get("spitze_avg_mit") is not None and peak_relevant(b):
         wirkung.append(f"Die mittlere Monatsspitze sinkt von {num(b['spitze_avg_ohne'])} kW auf "
                        f"{num(b['spitze_avg_mit'])} kW.")
-    if b.get("evq_ohne") is not None and b.get("evq_mit") is not None and pv_da(b):
+    if b.get("evq_ohne") is not None and b.get("evq_mit") is not None and pv_da(b) and last_da(b):
         wirkung.append(f"Die Eigenverbrauchsquote liegt mit Batterie bei {num(b['evq_mit'])} % "
                        f"(ohne {num(b['evq_ohne'])} %).")
     if wirkung:
@@ -1674,7 +1712,7 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde, y=None):
     fazit = kunde.get("texte", {}).get("fazit") or fazit_auto
     y -= para(c, fazit, M, y, CW, S(9.2)) + 4 * mm
     hinweis = (f"Alle Ergebnisse beruhen auf historischen Daten {periode(b)['phrase']} "
-               "(Lastgang, Strom- und Regelleistungspreise). Sie zeigen, was der Speicher unter diesen Bedingungen "
+               "(" + datenarten(b) + "). Sie zeigen, was der Speicher unter diesen Bedingungen "
                "erwirtschaftet hätte. Zukünftige Erträge können davon abweichen. Die Ergebnisse sind deshalb keine "
                "Garantie für die Wirtschaftlichkeit in den kommenden Jahren.")
     y -= d.callout(M, y, CW, hinweis, titel="Wichtiger Hinweis: Berechnung auf Basis historischer Daten",

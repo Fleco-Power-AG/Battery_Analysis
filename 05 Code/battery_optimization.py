@@ -352,6 +352,9 @@ def read_inputs(path: str = INPUT_PATH):
         # in Parameter!E50 (Transparenz-Notiz, analog swissix_quelle in E5);
         # der Kundenfaktor steht in C52 (nur bei "Kunde" relevant).
         "srl_preisquelle": wsP["E50"].value,
+        # NEU: verwendete PV-Profilquelle (Messprofil / Standortprofil / Standardprofil),
+        # von input_prep.py in Parameter!E26 vermerkt; fehlt bei alten Dateien.
+        "pv_profilquelle": wsP["E26"].value,
         "srl_kundenfaktor": (
             wsP["C52"].value
             if "kundenfaktor" in str(wsP["A52"].value or "").lower() else None

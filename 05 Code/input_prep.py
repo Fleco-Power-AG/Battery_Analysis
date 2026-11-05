@@ -1287,6 +1287,111 @@ def srl_quelle_text(schema: str, info: dict, kundenfaktor: float, energie_aufsch
 
 
 # --------------------------------------------------------------------------
+# 4c. PV-Profil: Hierarchie und Standortprofil (Beat, 3.11.2026)
+# --------------------------------------------------------------------------
+#
+#   1. Messprofil in Zeitreihen!F (PV_Profil) vorhanden -> wird verwendet,
+#      übersteuert alles (Parameter!C26 wird auf "Profil_Zeitreihe" gesetzt).
+#   2. Parameter!C26 = "Standortprofil" und Angaben im Block "PV-Standort"
+#      (PLZ + bis zu 4 Flächen) -> Profil aus MeteoSwiss-Messdaten berechnen
+#      (pv_standort.py), nach Zeitreihen!F schreiben, C26 = "Profil_Zeitreihe".
+#   3. Sonst Standardprofil (Zeitreihen!E) x DC-Leistung (C26 = "normiert").
+# Die verwendete Quelle steht danach in Parameter!E26 (-> Bericht).
+
+PV_QUELLE_CELL = "E26"
+PV_FLAECHEN_MAX = 4
+
+
+def _norm_label(txt) -> str:
+    return " ".join(str(txt or "").lower().replace("–", " ").replace("-", " ").split())
+
+
+def _parameter_nach_label(ws_param) -> dict:
+    """Spalte A -> Wert in Spalte C (für den Block 'PV-Standort' am Ende des Blatts)."""
+    werte = {}
+    for r in range(1, ws_param.max_row + 1):
+        lab = ws_param.cell(row=r, column=1).value
+        if lab:
+            werte[_norm_label(lab)] = ws_param.cell(row=r, column=3).value
+    return werte
+
+
+def _zahl(v):
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        return float(str(v).replace("'", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path):
+    wahl = str(ws_param["C26"].value or "").strip().lower()
+    f_werte = pd.to_numeric(
+        pd.Series([ws_zeit.cell(row=r, column=COL_PV_PROFIL).value for r in range(2, n_rows + 1)]),
+        errors="coerce")
+
+    # 1) Messprofil übersteuert alles
+    if f_werte.notna().any() and f_werte.fillna(0).sum() > 0:
+        if wahl != "profil_zeitreihe":
+            print(f"  PV: Messprofil in Zeitreihen!F gefunden -- übersteuert '{ws_param['C26'].value}'.")
+        ws_param["C26"] = "Profil_Zeitreihe"
+        ws_param[PV_QUELLE_CELL] = "Messprofil (Zeitreihe)"
+        return
+
+    if wahl != "standortprofil":
+        ws_param[PV_QUELLE_CELL] = "Standardprofil × DC-Leistung"
+        return
+
+    # 2) Standortprofil
+    from pv_standort import Flaeche, berechne_standortprofil
+    p = _parameter_nach_label(ws_param)
+    plz = p.get("plz standort")
+    flaechen = []
+    for i in range(1, PV_FLAECHEN_MAX + 1):
+        kwp = _zahl(p.get(f"fläche {i} leistung"))
+        if kwp and kwp > 0:
+            flaechen.append(Flaeche(kwp=kwp, neigung=_zahl(p.get(f"fläche {i} neigung")) or 0.0,
+                                    ausrichtung=_zahl(p.get(f"fläche {i} ausrichtung")) or 0.0))
+    kwp_summe = sum(f.kwp for f in flaechen)
+
+    def rueckfall(grund):
+        print(f"  WARNUNG PV-Standortprofil: {grund} -> Standardprofil × DC-Leistung.")
+        ws_param["C26"] = "normiert"
+        if kwp_summe and not _zahl(ws_param["C25"].value):
+            ws_param["C25"] = kwp_summe
+        ws_param[PV_QUELLE_CELL] = f"Standardprofil × DC-Leistung (Standortprofil nicht möglich: {grund})"
+
+    if not plz:
+        return rueckfall("keine PLZ im Block 'PV-Standort'")
+    if not flaechen:
+        return rueckfall("keine Fläche mit kWp > 0")
+    stamm = find_stammdaten_dir(input_path) or os.path.join(os.path.dirname(os.path.abspath(input_path)),
+                                                           STAMMDATEN_DIRNAME)
+    try:
+        print("Berechne PV-Standortprofil aus MeteoSwiss-Messdaten ...")
+        profil, info = berechne_standortprofil(
+            plz, flaechen, index, os.path.join(stamm, "MeteoSwiss"),
+            verluste=_zahl(p.get("systemverluste")), ac_max_kw=_zahl(p.get("wechselrichter ac leistung")))
+    except Exception as exc:  # noqa: BLE001
+        return rueckfall(str(exc))
+
+    for r, v in zip(range(2, n_rows + 1), profil.values):
+        ws_zeit.cell(row=r, column=COL_PV_PROFIL).value = float(v)
+    dc_alt = _zahl(ws_param["C25"].value)
+    if dc_alt and abs(dc_alt - kwp_summe) > 0.5:
+        print(f"  Hinweis: DC-Leistung C25 ({dc_alt:g} kWp) durch Summe der Flächen ersetzt ({kwp_summe:g} kWp).")
+    ws_param["C25"] = kwp_summe
+    ws_param["C26"] = "Profil_Zeitreihe"
+    flaechen_txt = ", ".join(f"{f.kwp:g} kWp {f.neigung:g}°/{f.ausrichtung:+g}°" for f in flaechen)
+    print(f"  Flächen: {flaechen_txt}")
+    # kurz halten -- erscheint als Zeile im PDF-Bericht
+    ws_param[PV_QUELLE_CELL] = (
+        f"Standortprofil, MeteoSwiss {info['station']} ({info['dist_km']:.0f} km), "
+        f"{info['spez_ertrag']:.0f} kWh/kWp")
+
+
+# --------------------------------------------------------------------------
 # 5. Hauptablauf
 # --------------------------------------------------------------------------
 
@@ -1561,12 +1666,9 @@ def main(
                 print("  -> PV-Profil erfolgreich ergaenzt.")
             except Exception as exc:  # noqa: BLE001
                 warnings.warn(f"PVGIS-Fetch fehlgeschlagen ({exc}).")
-    else:
-        print(
-            "PV-Referenzprofil (Spalte E) NICHT ergaenzt -- Standort/Ausrichtung "
-            "noch nicht bekannt (siehe Excel-Kommentar 'mail Urs/Astrid'). "
-            "main(fetch_pv=True, pv_lat=..., pv_lon=...) aufrufen, sobald bekannt."
-        )
+
+    # --- 3b. PV-Profil-Hierarchie (Messprofil > Standortprofil > Standardprofil) ---
+    pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path)
 
     # --- 4. SRL-Preise (NEU: Markt/Kunde, CSV-Marktpreise + Forecast) ---------
     # Siehe Kommentarblock "4b" weiter oben fuer die Logik.

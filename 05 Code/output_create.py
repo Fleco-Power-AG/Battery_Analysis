@@ -1946,6 +1946,8 @@ def build_input_summary_rows(
     if not _ist_wert_null(params.get("dc_leistung")):
         abschaltung_anzeige = "Ja" if _pv_abschaltung_erlaubt(params) else "Nein"
         rows.append({"label": "Abschaltung bei Negativpreisen", "value": abschaltung_anzeige})
+        if params.get("pv_profilquelle"):
+            rows.append({"label": "PV-Profil", "value": str(params["pv_profilquelle"])})
 
     eta_laden = None
     eta_entladen = None

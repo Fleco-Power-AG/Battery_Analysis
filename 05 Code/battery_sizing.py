@@ -232,6 +232,16 @@ warnings.filterwarnings(
 # --------------------------------------------------------------------------
 C_RATEN = [0.25, 0.5, 1.0]
 
+# NEU (Beat, 5.11.2026): Das Raster liegt (logarithmisch) SYMMETRISCH um die im
+# Input-Excel angegebene Batterie (Parameter!C29), statt um eine aus dem
+# PV-/Lastprofil abgeleitete Basis. Damit bleiben die Varianten im Rahmen der
+# geplanten Investition: 1/3x ... 3x der angegebenen Kapazität.
+KAPAZITAETS_MULTIPLIKATOREN = [1 / 3, 0.5, 2 / 3, 1.0, 1.5, 2.0, 3.0]
+# Erweiterung NUR nach dem Kriterium Kapitalverzinsung (nicht nach Gewinn, der
+# mit der Grösse ohnehin fast immer weiter steigt): liegt die beste
+# Kapitalverzinsung am Rand des Rasters, wird eine Stufe weiter (x/÷ Faktor) getestet.
+KAPAZITAETS_ERWEITERUNG_FAKTOR = 1.5
+
 # NEU (Beat, 22.9.2026, zweite Korrektur: "zurueck zur 'auto' groessen-
 # detection aber in einem sinnvollen Verhaeltnis von Last und PV") -- die
 # Kapazitaets-Basis kommt wieder automatisch aus dem PV-/Lastprofil (siehe
@@ -438,6 +448,27 @@ def baue_raster(
     return kapazitaeten, herkunft
 
 
+def baue_raster_um_batterie(
+    kapazitaet_kwh: float,
+    pv_profile: pd.Series | np.ndarray,
+    last_profile: pd.Series | np.ndarray,
+    dt_hours: float = 0.25,
+) -> tuple[list[float], float]:
+    """Kapazitäts-Raster symmetrisch (logarithmisch) um die angegebene Batterie.
+    Ohne Kapazitätsangabe: Rückfall auf die profilbasierte Basis (baue_raster()).
+    Gibt (Kapazitäten, Basis-kWh) zurück."""
+    if kapazitaet_kwh and kapazitaet_kwh > 1e-6:
+        stufen = sorted({_rund_schoen(kapazitaet_kwh * m) for m in KAPAZITAETS_MULTIPLIKATOREN} | {kapazitaet_kwh})
+        stufen = [k for k in stufen if k > 0]
+        print(f"  Kapazitäts-Raster um die angegebene Batterie ({kapazitaet_kwh:,.0f} kWh): {stufen} kWh "
+              f"(je kombiniert mit C-Raten {C_RATEN})")
+        return stufen, kapazitaet_kwh
+    print("  HINWEIS: keine Batteriekapazität im Input -- Raster aus PV-/Lastprofil abgeleitet.")
+    kapazitaeten, _ = baue_raster(pv_profile, last_profile, dt_hours)
+    basis_kwh, _ = bestimme_kapazitaets_basis(pv_profile, last_profile, dt_hours)
+    return kapazitaeten, basis_kwh
+
+
 # --------------------------------------------------------------------------
 # 2. Ein Rasterpunkt rechnen (braucht battery_optimization -> lazy Import)
 # --------------------------------------------------------------------------
@@ -602,12 +633,8 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
     pv_profile = battery_optimization.build_pv_profile(params_original, zeitreihen_original)
     last_profile = battery_optimization.build_last_profile(params_original, zeitreihen_original)
 
-    kapazitaeten, _ = baue_raster(pv_profile, last_profile, battery_optimization.DT_HOURS)
-    # NEU (siehe KAPAZITAETS_AUTO_ERWEITERN oben): fuer die automatische
-    # Raster-Erweiterung wird die Basis separat noch einmal gebraucht (reine
-    # numpy-Berechnung, vernachlaessigbar teuer -- billiger als baue_raster()'s
-    # Rueckgabewert dafuer extra umzubauen).
-    basis_kwh, _ = bestimme_kapazitaets_basis(pv_profile, last_profile, battery_optimization.DT_HOURS)
+    kapazitaeten, basis_kwh = baue_raster_um_batterie(
+        params_original.get("kapazitaet"), pv_profile, last_profile, battery_optimization.DT_HOURS)
 
     # NEU (Beat, 22.9.2026): Parameter!C41 kann "gegebenenfalls" einen FIXEN
     # Total-Investitionsbetrag (CHF) vorgeben statt des CHF/kWh-Ansatzes (C34)
@@ -758,149 +785,41 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
     )
     zeilen = _punkte_rechnen(rasterpunkte)
 
-    # NEU (Beat, 24.9.2026: "bei allen Runs die ich gemacht habe war C=1 und
-    # die groesste Batterie-Konfiguration die beste Wahl ... kann es sein
-    # dass das Autosizing auf zu kleine Batterien geht?") -- siehe
-    # KAPAZITAETS_AUTO_ERWEITERN oben: wenn das bisher beste Ergebnis bei der
-    # GROESSTEN getesteten Kapazitaet liegt, war das Raster vermutlich zu
-    # schmal (Gewinnkurve am oberen Rand noch steigend) -- automatisch eine
-    # weitere, groessere Kapazitaetsstufe anhaengen und neu rechnen, bis ein
-    # echtes inneres Maximum gefunden wird oder das Sicherheitslimit erreicht
-    # ist.
+    # NEU (Beat, 5.11.2026): automatische Erweiterung ausschliesslich nach der
+    # KAPITALVERZINSUNG. Der Nettogewinn steigt mit der Grösse fast immer weiter
+    # und ist deshalb kein sinnvolles Kriterium. Liegt die beste Verzinsung an
+    # der grössten (kleinsten) getesteten Kapazität, wird eine Stufe grösser
+    # (kleiner) gerechnet, bis ein inneres Optimum gefunden ist oder das Limit
+    # KAPAZITAETS_MAX_ERWEITERUNGEN je Richtung erreicht ist.
     if KAPAZITAETS_AUTO_ERWEITERN and basis_kwh > 1e-6:
-        erweiterungsrunde = 0
-        while erweiterungsrunde < KAPAZITAETS_MAX_ERWEITERUNGEN:
-            gueltige = [z for z in zeilen if z.get("fehler") is None]
+        runden = {"oben": 0, "unten": 0}
+        while True:
+            gueltige = [z for z in zeilen
+                        if z.get("fehler") is None and z.get("kapitalverzinsung_pct") is not None]
             if not gueltige:
                 break
-            beste_zeile = max(gueltige, key=lambda z: z["gewinn_verlust_chf_jahr"])
-            aktuelle_max_kapazitaet = max(kapazitaeten)
-            if beste_zeile["kapazitaet_kwh"] < aktuelle_max_kapazitaet - 1e-6:
-                # Bestes Ergebnis liegt INNERHALB des Rasters -- echtes
-                # (inneres) Maximum gefunden, keine weitere Erweiterung noetig.
+            beste = max(gueltige, key=lambda z: (z["kapitalverzinsung_pct"], -z["kapazitaet_kwh"]))
+            k_min, k_max = min(kapazitaeten), max(kapazitaeten)
+            if abs(beste["kapazitaet_kwh"] - k_max) < 1e-6 and runden["oben"] < KAPAZITAETS_MAX_ERWEITERUNGEN:
+                richtung, neu = "oben", _rund_schoen(k_max * KAPAZITAETS_ERWEITERUNG_FAKTOR)
+            elif (abs(beste["kapazitaet_kwh"] - k_min) < 1e-6 and runden["unten"] < KAPAZITAETS_MAX_ERWEITERUNGEN
+                  and k_min / KAPAZITAETS_ERWEITERUNG_FAKTOR >= basis_kwh * KAPAZITAETS_MULTIPLIKATOR_MIN):
+                richtung, neu = "unten", _rund_schoen(k_min / KAPAZITAETS_ERWEITERUNG_FAKTOR)
+            else:
+                if abs(beste["kapazitaet_kwh"] - k_max) < 1e-6 or abs(beste["kapazitaet_kwh"] - k_min) < 1e-6:
+                    print(f"\n  HINWEIS: die beste Kapitalverzinsung ({beste['kapitalverzinsung_pct']:.1f} %) "
+                          f"liegt weiterhin am Rand des Rasters ({beste['kapazitaet_kwh']:,.0f} kWh). "
+                          "Erweiterungslimit erreicht.")
                 break
-
-            aktueller_multiplikator = aktuelle_max_kapazitaet / basis_kwh
-            neuer_multiplikator = round(aktueller_multiplikator) + KAPAZITAETS_ERWEITERUNGS_SCHRITT
-            neue_kapazitaet = _rund_schoen(basis_kwh * neuer_multiplikator)
-            versuch = 0
-            while (neue_kapazitaet <= aktuelle_max_kapazitaet or neue_kapazitaet in kapazitaeten) and versuch < 5:
-                neuer_multiplikator += KAPAZITAETS_ERWEITERUNGS_SCHRITT
-                neue_kapazitaet = _rund_schoen(basis_kwh * neuer_multiplikator)
-                versuch += 1
-            if neue_kapazitaet <= aktuelle_max_kapazitaet or neue_kapazitaet in kapazitaeten:
-                print("  HINWEIS: konnte keine neue, noch nicht getestete (und "
-                      "groessere) Kapazitaetsstufe finden -- automatische "
-                      "Erweiterung wird hier abgebrochen.")
+            if neu in kapazitaeten or neu <= 0:
                 break
-
-            erweiterungsrunde += 1
-            print(
-                f"\n  HINWEIS: das bisher beste Ergebnis liegt bei der GROESSTEN "
-                f"getesteten Kapazitaet ({aktuelle_max_kapazitaet:,.0f} kWh) -- das "
-                f"wirtschaftliche Optimum koennte also noch groesser sein. "
-                f"Automatische Raster-Erweiterung {erweiterungsrunde}/"
-                f"{KAPAZITAETS_MAX_ERWEITERUNGEN}: teste zusaetzlich "
-                f"{neue_kapazitaet:,.0f} kWh ..."
-            )
-            kapazitaeten = sorted(set(kapazitaeten) | {neue_kapazitaet})
-            zeilen.extend(_punkte_rechnen([(neue_kapazitaet, c) for c in C_RATEN]))
-        else:
-            print(
-                f"\n  HINWEIS: auch nach {KAPAZITAETS_MAX_ERWEITERUNGEN} "
-                f"automatischen Raster-Erweiterungen liegt das beste Ergebnis "
-                f"weiterhin bei der groessten getesteten Kapazitaet "
-                f"({max(kapazitaeten):,.0f} kWh). Das kann bedeuten, dass hier "
-                f"tatsaechlich noch groessere Batterien wirtschaftlich sinnvoll "
-                f"sind, oder dass die Gewinnkurve in diesem Szenario kein klares "
-                f"Maximum hat (z.B. sehr hohes Arbitrage-Potenzial) -- bitte "
-                f"Ergebnis pruefen bzw. bei Bedarf KAPAZITAETS_MAX_ERWEITERUNGEN "
-                f"erhoehen oder manuell noch groessere Kapazitaeten testen."
-            )
-
-    # NEU (Beat, 29.9.2026: "auch sollte das sizing dann so angepasst werden
-    # damit nicht nur hohe gewinne/verlust erzielt werden sondern dass wir
-    # bereiche abdecken mit einer tiefen amortisationsdauer") -- analog zur
-    # Erweiterung nach oben (getrieben vom hoechsten Gewinn/Verlust), hier
-    # eine Erweiterung nach UNTEN, getrieben von der kuerzesten
-    # Amortisationsdauer: liegt die guenstigste Amortisationsdauer bei der
-    # KLEINSTEN getesteten Kapazitaet, koennte eine noch kleinere Batterie
-    # kapitaleffizienter sein (kuerzere Amortisation), auch wenn ihr
-    # absoluter Gewinn/Verlust tiefer liegt als bei einer groesseren Anlage --
-    # deshalb eigenes Kriterium, unabhaengig von der Gewinn/Verlust-Erweiterung
-    # oben.
-    if KAPAZITAETS_AUTO_ERWEITERN and basis_kwh > 1e-6:
-        erweiterungsrunde_unten = 0
-        while erweiterungsrunde_unten < KAPAZITAETS_MAX_ERWEITERUNGEN:
-            gueltige_amort = [
-                z for z in zeilen
-                if z.get("fehler") is None and z.get("amortisationsdauer_jahre") is not None
-            ]
-            if not gueltige_amort:
-                break
-            beste_amort_zeile = min(gueltige_amort, key=lambda z: z["amortisationsdauer_jahre"])
-            aktuelle_min_kapazitaet = min(kapazitaeten)
-            if beste_amort_zeile["kapazitaet_kwh"] > aktuelle_min_kapazitaet + 1e-6:
-                # Guenstigste Amortisationsdauer liegt bereits INNERHALB des
-                # Rasters -- kein Bedarf, noch kleinere Kapazitaeten zu testen.
-                break
-
-            aktueller_multiplikator_unten = aktuelle_min_kapazitaet / basis_kwh
-            neuer_multiplikator_unten = aktueller_multiplikator_unten - KAPAZITAETS_ERWEITERUNGS_SCHRITT_UNTEN
-            neue_kapazitaet_unten = (
-                _rund_schoen(basis_kwh * neuer_multiplikator_unten)
-                if neuer_multiplikator_unten >= KAPAZITAETS_MULTIPLIKATOR_MIN else None
-            )
-            versuch = 0
-            while (
-                neue_kapazitaet_unten is not None
-                and (neue_kapazitaet_unten >= aktuelle_min_kapazitaet or neue_kapazitaet_unten in kapazitaeten)
-                and versuch < 5
-            ):
-                neuer_multiplikator_unten -= KAPAZITAETS_ERWEITERUNGS_SCHRITT_UNTEN
-                neue_kapazitaet_unten = (
-                    _rund_schoen(basis_kwh * neuer_multiplikator_unten)
-                    if neuer_multiplikator_unten >= KAPAZITAETS_MULTIPLIKATOR_MIN else None
-                )
-                versuch += 1
-            if (
-                neue_kapazitaet_unten is None
-                or neue_kapazitaet_unten >= aktuelle_min_kapazitaet
-                or neue_kapazitaet_unten in kapazitaeten
-            ):
-                print(
-                    "  HINWEIS: konnte keine neue, noch nicht getestete (und "
-                    "kleinere) Kapazitaetsstufe finden, oder die untere "
-                    f"Multiplikator-Grenze ({KAPAZITAETS_MULTIPLIKATOR_MIN:g}x Basis) "
-                    "ist erreicht -- automatische Erweiterung nach unten wird hier "
-                    "abgebrochen."
-                )
-                break
-
-            erweiterungsrunde_unten += 1
-            print(
-                f"\n  HINWEIS: die guenstigste Amortisationsdauer liegt bei der "
-                f"KLEINSTEN getesteten Kapazitaet ({aktuelle_min_kapazitaet:,.0f} kWh) -- "
-                f"eine kleinere Batterie koennte also kapitaleffizienter sein "
-                f"(kuerzere Amortisation), auch wenn ihr absoluter Gewinn tiefer "
-                f"liegt. Automatische Raster-Erweiterung nach unten "
-                f"{erweiterungsrunde_unten}/{KAPAZITAETS_MAX_ERWEITERUNGEN}: teste "
-                f"zusaetzlich {neue_kapazitaet_unten:,.0f} kWh ..."
-            )
-            kapazitaeten = sorted(set(kapazitaeten) | {neue_kapazitaet_unten})
-            zeilen.extend(_punkte_rechnen([(neue_kapazitaet_unten, c) for c in C_RATEN]))
-        else:
-            print(
-                f"\n  HINWEIS: auch nach {KAPAZITAETS_MAX_ERWEITERUNGEN} "
-                f"automatischen Raster-Erweiterungen nach unten liegt die "
-                f"guenstigste Amortisationsdauer weiterhin bei der kleinsten "
-                f"getesteten Kapazitaet ({min(kapazitaeten):,.0f} kWh). Das kann "
-                f"bedeuten, dass hier tatsaechlich noch kleinere Batterien "
-                f"kapitaleffizienter sind (bitte pruefen bzw. bei Bedarf "
-                f"KAPAZITAETS_MAX_ERWEITERUNGEN erhoehen), oder dass die untere "
-                f"Multiplikator-Grenze ({KAPAZITAETS_MULTIPLIKATOR_MIN:g}x Basis) "
-                f"bereits erreicht war."
-            )
+            runden[richtung] += 1
+            print(f"\n  HINWEIS: beste Kapitalverzinsung ({beste['kapitalverzinsung_pct']:.1f} %) liegt am "
+                  f"{'oberen' if richtung == 'oben' else 'unteren'} Rand ({beste['kapazitaet_kwh']:,.0f} kWh). "
+                  f"Erweiterung nach {richtung} {runden[richtung]}/{KAPAZITAETS_MAX_ERWEITERUNGEN}: "
+                  f"teste zusätzlich {neu:,.0f} kWh ...")
+            kapazitaeten = sorted(set(kapazitaeten) | {neu})
+            zeilen.extend(_punkte_rechnen([(neu, c) for c in C_RATEN]))
 
     return pd.DataFrame(zeilen)
 
