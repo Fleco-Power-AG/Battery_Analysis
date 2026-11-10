@@ -122,6 +122,7 @@ systemweit installiert).
 from __future__ import annotations
 
 import datetime as dt
+from parameter_layout import zelle, zeile, cache_leeren
 import os
 import sys
 import warnings
@@ -224,6 +225,7 @@ def _check_label(ws_param, row: int, expected) -> None:
     erwarteten Feldnamen, damit ein umgebautes Parameter-Sheet (Zeilen
     verschoben/eingefuegt, ist in diesem Projekt schon mehrfach passiert)
     einen klaren Fehler statt stiller Fehlwerte ergibt."""
+    row = zeile(ws_param, row)          # historische Zeile -> tatsächliche Zeile (Layout-unabhängig)
     actual = ws_param[f"A{row}"].value
     actual_norm = str(actual).strip().lower() if actual is not None else ""
     erwartet = [expected] if isinstance(expected, str) else list(expected)
@@ -236,8 +238,28 @@ def _check_label(ws_param, row: int, expected) -> None:
         )
 
 
+def _netzentgelt_modus(raw) -> str:
+    t = str(raw or "").strip().lower()
+    if t.startswith("rück") or t.startswith("rueck"):
+        return "rueckerstattung"
+    if t.startswith("befrei"):
+        return "befreit"
+    return "keine"
+
+
+def _wert_nach_label(ws, label: str):
+    """Wert in Spalte C zur Bezeichnung in Spalte A (für Zeilen, die nicht an fester Stelle stehen)."""
+    ziel = " ".join(label.lower().split())
+    for r in range(1, ws.max_row + 1):
+        a = ws.cell(row=r, column=1).value
+        if a and " ".join(str(a).lower().split()) == ziel:
+            return ws.cell(row=r, column=3).value
+    return None
+
+
 def read_inputs(path: str = INPUT_PATH):
     wb = load_workbook(path, data_only=True)
+    cache_leeren()
     wsP = wb["Parameter"]
     wsZ = wb["Zeitreihen"]
 
@@ -264,8 +286,8 @@ def read_inputs(path: str = INPUT_PATH):
         _check_label(wsP, row, label)
 
     params = {
-        "beginn": wsP["C2"].value,
-        "ende": wsP["C3"].value,
+        "beginn": wsP[zelle(wsP, "C2")].value,
+        "ende": wsP[zelle(wsP, "C3")].value,
         # NEU (Beats Wunsch nach einer "wichtige Inputs"-Uebersichtsseite im
         # PDF-Report): bisher hat battery_optimization.py nur die Zellen
         # gelesen, die die Optimierung selbst braucht -- Tarifschema (C5) und
@@ -278,51 +300,51 @@ def read_inputs(path: str = INPUT_PATH):
         # nur zu reinen Anzeigezwecken (Report) mitgelesen, NICHT fuer die
         # Optimierung selbst gebraucht (die fertig berechneten Tarife stehen
         # bereits in Zeitreihen!C/D/K).
-        "tarifschema": wsP["C5"].value,
+        "tarifschema": wsP[zelle(wsP, "C5")].value,
         # NEU (Beats Wunsch nach Transparenz, ob SwissIX automatisch von der
         # API geladen oder von Hand in Zeitreihen!B eingetragen wurde): wird
         # von input_prep.py in diese bisher ungenutzte Zelle geschrieben,
         # siehe dort. None, falls kein SPOT-Schema bzw. keine SwissIX-Werte.
-        "swissix_quelle": wsP["E5"].value,
-        "ht_preis": wsP["C6"].value,
-        "nt_preis": wsP["C7"].value,
-        "netznutzung_leistung": wsP["C8"].value,
-        "tage_ht": wsP["C9"].value,
-        "start_ht": wsP["C10"].value,
-        "end_ht": wsP["C11"].value,
-        "spot_abschlag_lieferung": wsP["C12"].value,
-        "spot_aufschlag_bezug": wsP["C13"].value,
+        "swissix_quelle": wsP[zelle(wsP, "E5")].value,
+        "ht_preis": wsP[zelle(wsP, "C6")].value,
+        "nt_preis": wsP[zelle(wsP, "C7")].value,
+        "netznutzung_leistung": wsP[zelle(wsP, "C8")].value,
+        "tage_ht": wsP[zelle(wsP, "C9")].value,
+        "start_ht": wsP[zelle(wsP, "C10")].value,
+        "end_ht": wsP[zelle(wsP, "C11")].value,
+        "spot_abschlag_lieferung": wsP[zelle(wsP, "C12")].value,
+        "spot_aufschlag_bezug": wsP[zelle(wsP, "C13")].value,
         # NEU (Beats Erweiterung: PV und Batterie koennen unterschiedlich
         # vermarktet werden -- eigenes Schema je Quelle, siehe input_prep.py::
         # resolve_rueckliefertarif()). Nur zu Anzeigezwecken mitgelesen; die
         # fertig berechneten CHF/kWh-Werte stehen bereits in Zeitreihen!C/K.
-        "rueckliefer_pv_schema": wsP["C14"].value,
-        "rueckliefer_pv_hkn": wsP["C15"].value,
-        "rueckliefer_pv_floor": wsP["C16"].value,
-        "rueckliefer_pv_fixtarif": wsP["C17"].value,
-        "rueckliefer_batterie_schema": wsP["C19"].value,
-        "rueckliefer_batterie_hkn": wsP["C20"].value,
-        "rueckliefer_batterie_floor": wsP["C21"].value,
-        "rueckliefer_batterie_fixtarif": wsP["C22"].value,
-        "dc_leistung": wsP["C25"].value,
-        "produktions_input": wsP["C26"].value,
+        "rueckliefer_pv_schema": wsP[zelle(wsP, "C14")].value,
+        "rueckliefer_pv_hkn": wsP[zelle(wsP, "C15")].value,
+        "rueckliefer_pv_floor": wsP[zelle(wsP, "C16")].value,
+        "rueckliefer_pv_fixtarif": wsP[zelle(wsP, "C17")].value,
+        "rueckliefer_batterie_schema": wsP[zelle(wsP, "C19")].value,
+        "rueckliefer_batterie_hkn": wsP[zelle(wsP, "C20")].value,
+        "rueckliefer_batterie_floor": wsP[zelle(wsP, "C21")].value,
+        "rueckliefer_batterie_fixtarif": wsP[zelle(wsP, "C22")].value,
+        "dc_leistung": wsP[zelle(wsP, "C25")].value,
+        "produktions_input": wsP[zelle(wsP, "C26")].value,
         # NEU (Beats Erweiterung 11.9.2026): "Ja"/"Nein"-Dropdown, ob die
         # PV-Anlage abgeregelt/gedrosselt werden darf (z.B. um Einspeisung
         # bei negativen Preisen zu vermeiden). Rohwert hier nur mitgelesen;
         # die eigentliche Ja/Nein-Auswertung (inkl. Rueckwaertskompatibilitaet
         # fuer aeltere Dateien ohne C27) macht `determine_pv_abschaltung_erlaubt()`.
-        "pv_abschaltung_erlaubt": wsP["C27"].value,
-        "kapazitaet": wsP["C29"].value,
-        "leistung": wsP["C30"].value,
-        "trafo_wirkungsgrad": wsP["C31"].value,
-        "lade_wirkungsgrad": wsP["C32"].value,
-        "entlade_wirkungsgrad": wsP["C33"].value,
-        "invest_kosten_kwh": wsP["C34"].value,
-        "unterhalt_kosten": wsP["C35"].value,
-        "lebenszeit": wsP["C36"].value,
-        "vollzyklen": wsP["C37"].value,
-        "ladegrenze_soc": wsP["C39"].value / 100.0,
-        "entladegrenze_soc": wsP["C40"].value / 100.0,
+        "pv_abschaltung_erlaubt": wsP[zelle(wsP, "C27")].value,
+        "kapazitaet": wsP[zelle(wsP, "C29")].value,
+        "leistung": wsP[zelle(wsP, "C30")].value,
+        "trafo_wirkungsgrad": wsP[zelle(wsP, "C31")].value,
+        "lade_wirkungsgrad": wsP[zelle(wsP, "C32")].value,
+        "entlade_wirkungsgrad": wsP[zelle(wsP, "C33")].value,
+        "invest_kosten_kwh": wsP[zelle(wsP, "C34")].value,
+        "unterhalt_kosten": wsP[zelle(wsP, "C35")].value,
+        "lebenszeit": wsP[zelle(wsP, "C36")].value,
+        "vollzyklen": wsP[zelle(wsP, "C37")].value,
+        "ladegrenze_soc": wsP[zelle(wsP, "C39")].value / 100.0,
+        "entladegrenze_soc": wsP[zelle(wsP, "C40")].value / 100.0,
         # NEU (Beats Erweiterung 22.9.2026): "gegebenenfalls" ein fixer
         # TOTAL-Investitionsbetrag (CHF) statt des CHF/kWh-Ansatzes (C34) --
         # nur ein Rohwert hier mitgelesen, die eigentliche Ja/Nein-Auswertung
@@ -331,40 +353,44 @@ def read_inputs(path: str = INPUT_PATH):
         # gecrasht wie bei C35 (Unterhalt) -- C41 ist per Definition OPTIONAL
         # ("gegebenenfalls"), ein leeres/nicht-numerisches Feld ist der
         # Normalfall und soll NICHT zu einem Fehler fuehren.
-        "investitionskosten_fix": wsP["C41"].value,
-        "max_einspeisung": wsP["C43"].value,
-        "max_bezug": wsP["C44"].value,
+        "investitionskosten_fix": wsP[zelle(wsP, "C41")].value,
+        "max_einspeisung": wsP[zelle(wsP, "C43")].value,
+        "max_bezug": wsP[zelle(wsP, "C44")].value,
         # NEU (Beats zwei zusaetzliche Netz-Parameter): eigene Grenzwerte fuer
         # den Netzaustausch DER BATTERIE (separat von den generischen
         # Standortlimiten C43/C44, die Last+Batterie zusammen betreffen).
         # Siehe build_energysystem() fuer die genaue Verwendung.
-        "max_einspeisung_batterie": wsP["C45"].value,  # Batterie -> Netz (Entladung)
-        "max_bezug_batterie": wsP["C46"].value,        # Netz -> Batterie (Ladung)
-        "srl_teilnahme": wsP["C49"].value,
+        "max_einspeisung_batterie": wsP[zelle(wsP, "C45")].value,  # Batterie -> Netz (Entladung)
+        "max_bezug_batterie": wsP[zelle(wsP, "C46")].value,        # Netz -> Batterie (Ladung)
+        "srl_teilnahme": wsP[zelle(wsP, "C49")].value,
         # NEU (Beats Wunsch: SRL-Preisschema in der Eingabeparameter-Uebersicht
         # anzeigen, z.B. "Backcast_2025_Kunde") -- bisher nur als Basis fuer
         # die in Zeitreihen!G/H bereits gebackenen SRL-Preise verwendet, aber
         # nie als eigener Wert mitgelesen/angezeigt.
-        "srl_preisschema": wsP["C50"].value,
+        "srl_preisschema": wsP[zelle(wsP, "C50")].value,
         # NEU (SRL-Pricing-Umbau 30.10.2026): C50 ist jetzt nur noch "Markt"
         # oder "Kunde". input_prep.py berechnet die SRL-Preise (Zeitreihen!G/H)
         # aus den CSV-Marktpreisen bzw. dem Forecast und vermerkt Quelle/Anteile
         # in Parameter!E50 (Transparenz-Notiz, analog swissix_quelle in E5);
         # der Kundenfaktor steht in C52 (nur bei "Kunde" relevant).
-        "srl_preisquelle": wsP["E50"].value,
+        "srl_preisquelle": wsP[zelle(wsP, "E50")].value,
         # NEU: verwendete PV-Profilquelle (Messprofil / Standortprofil / Standardprofil),
         # von input_prep.py in Parameter!E26 vermerkt; fehlt bei alten Dateien.
-        "pv_profilquelle": wsP["E26"].value,
+        "pv_profilquelle": wsP[zelle(wsP, "E26")].value,
+        # NEU: Netznutzung + Abgaben (Block am Ende des Parameter-Blatts, per Label gesucht)
+        "abgaben_ht_raw": _wert_nach_label(wsP, "Netz + Abgaben HT"),
+        "abgaben_nt_raw": _wert_nach_label(wsP, "Netz + Abgaben NT"),
+        "netzentgelt_speicher": _netzentgelt_modus(_wert_nach_label(wsP, "Netzentgelt Speicher")),
         "srl_kundenfaktor": (
-            wsP["C52"].value
-            if "kundenfaktor" in str(wsP["A52"].value or "").lower() else None
+            wsP[zelle(wsP, "C52")].value
+            if "kundenfaktor" in str(wsP[zelle(wsP, "A52")].value or "").lower() else None
         ),
-        "last_vorhanden": wsP["C54"].value,  # neu: "Ja" -> Zeitreihen!I, "Nein" -> keine Last
+        "last_vorhanden": wsP[zelle(wsP, "C54")].value,  # neu: "Ja" -> Zeitreihen!I, "Nein" -> keine Last
     }
 
     # Durchsatzbegrenzung/Jahr (C38 ist im Original eine Formel; falls der
     # gecachte Wert beim Excel-Resave verlorengegangen ist, hier neu herleiten)
-    durchsatz = wsP["C38"].value
+    durchsatz = wsP[zelle(wsP, "C38")].value
     if not isinstance(durchsatz, (int, float)):
         durchsatz = params["kapazitaet"] * params["vollzyklen"] / params["lebenszeit"]
     params["durchsatz_mwh_jahr"] = durchsatz
@@ -477,6 +503,14 @@ def read_inputs(path: str = INPUT_PATH):
             "rueckliefertarif_batterie": col(COL_RUECKLIEFER_BATTERIE),
         }
     )
+    def col_nach_kopf(kopf):
+        for c in range(1, wsZ.max_column + 1):
+            if str(wsZ.cell(row=1, column=c).value or "").strip() == kopf:
+                return col(c).fillna(0.0)
+        return pd.Series(0.0, index=index)
+    zeitreihen["abgaben"] = col_nach_kopf("Netz + Abgaben [CHF/kWh]")
+    zeitreihen["rueckerstattung"] = col_nach_kopf("Rückerstattung Speicher [CHF/kWh]")
+
     if zeitreihen["rueckliefertarif_batterie"].isna().all():
         print(
             "  HINWEIS: Zeitreihen!K (Rueckliefertarif_Batterie) ist leer -- "
@@ -970,6 +1004,30 @@ def add_peak_shaving(om, netz_source, netzbezug_bus, leistungspreis: float, time
 
 
 # --------------------------------------------------------------------------
+# 3b. Netzentgelt Speicher (Art. 14a StromVG)
+# --------------------------------------------------------------------------
+
+def add_netzentgelt_speicher(om, netz_charge, ladebus, batt_export, b_export, satz: np.ndarray,
+                             modus: str, dt_hours: float):
+    """Gutschrift auf das Netzentgelt für Netzladung der Batterie.
+    befreit:          ganze Netzladung (Speicher ohne Endverbrauch, Art. 14a Abs. 1 StromVG).
+    rueckerstattung:  nur die Menge, die aus dem Netz geladen UND wieder ins Netz eingespeist wird,
+                      bewertet zum Satz im Zeitpunkt der Ladung (Art. 14a Abs. 4 StromVG):
+                      r_t <= Netzladung_t,  Summe r_t <= Summe Batterie-Einspeisung_t."""
+    block = po.Block()
+    om.add_component("NetzentgeltSpeicher", block)
+    if modus == "befreit":
+        block.r = po.Expression(om.TIMESTEPS, rule=lambda b, t: om.flow[netz_charge, ladebus, t])
+    else:
+        block.r = po.Var(om.TIMESTEPS, within=po.NonNegativeReals)
+        block.r_max = po.Constraint(om.TIMESTEPS, rule=lambda b, t: b.r[t] <= om.flow[netz_charge, ladebus, t])
+        block.r_menge = po.Constraint(rule=lambda b: sum(b.r[t] for t in om.TIMESTEPS)
+                                      <= sum(om.flow[batt_export, b_export, t] for t in om.TIMESTEPS))
+    gutschrift = sum(float(satz[i]) * dt_hours * block.r[t] for i, t in enumerate(om.TIMESTEPS) if satz[i])
+    return block, -gutschrift
+
+
+# --------------------------------------------------------------------------
 # 4. SRL Variante B: Teil der Optimierung (einfache Variante)
 # --------------------------------------------------------------------------
 
@@ -1236,7 +1294,12 @@ def solve(om, solver: str = SOLVER, logfile: str | None = None,
     welche Richtung (falls ueberhaupt) hilft.
     """
     _ensure_solver_auf_path()
-    solve_kwargs = {"tee": True}
+    try:  # kompakte Konsole (konsole.py): Solver-Ausgabe nur ins Logfile
+        import konsole
+        tee = konsole.VOLL
+    except ImportError:
+        tee = True
+    solve_kwargs = {"tee": tee}
     if logfile:
         solve_kwargs["logfile"] = logfile
     if symbolic_solver_labels is not None:
@@ -1920,6 +1983,16 @@ def main(
         )
         zusatzkosten_terme.append(peak_kosten)
 
+    netzentgelt_block = None
+    netzentgelt_modus = params.get("netzentgelt_speicher", "keine")
+    if netzentgelt_modus != "keine" and float(np.nansum(zeitreihen["rueckerstattung"].values)) > 0:
+        print(f"Aktiviere Netzentgelt Speicher ({netzentgelt_modus}) ...")
+        netzentgelt_block, ne_term = add_netzentgelt_speicher(
+            om, node_refs["link_netz_charge"], node_refs["b_ladebus"], node_refs["link_batt_export"],
+            node_refs["b_export"], zeitreihen["rueckerstattung"].values, netzentgelt_modus, dt_hours,
+        )
+        zusatzkosten_terme.append(ne_term)
+
     if srl_variante == "optimiert":
         print("Aktiviere SRL als Teil der Optimierung (einfache Variante) ...")
         _, srl_kosten = add_srl_optimiert(
@@ -2033,6 +2106,12 @@ def main(
         anteile["srl_neg_kw"] = srl_neg_kw_opt
         anteile["ertrag_srl"] = ertrag_srl
         module["SRL (Teil der Optimierung)"] = float(np.sum(ertrag_srl))
+
+    if netzentgelt_block is not None:
+        r_kw = np.array([po.value(netzentgelt_block.r[t]) or 0.0 for t in om.TIMESTEPS])
+        ertrag_ne = zeitreihen["rueckerstattung"].values[:len(r_kw)] * r_kw * dt_hours
+        anteile["ertrag_netzentgelt"] = ertrag_ne
+        module["Netzentgelt Speicher"] = float(np.sum(ertrag_ne))
 
     total = sum(module.values())
     module["Total (operativ)"] = total

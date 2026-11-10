@@ -72,6 +72,7 @@ MODUL_FARBEN = {
     "Eigenverbrauchsoptimierung": "#A9D18E",
     "Einspeiseoptimierung": C["amber"],
     "Arbitrage": C["blue"],
+    "Netzentgelt Speicher": "#56B4E9",
     "Übrige": C["grey2"],
 }
 MODUL_LANG = {
@@ -80,6 +81,7 @@ MODUL_LANG = {
     "Eigenverbrauchsoptimierung": "Eigenverbrauchsoptimierung",
     "Einspeiseoptimierung": "Einspeiseoptimierung",
     "Arbitrage": "Arbitrage",
+    "Netzentgelt Speicher": "Netzentgelt Speicher",
 }
 
 FIRMA_FOOTER = ("Fleco Power AG  |  Technoparkstrasse 2  |  8406 Winterthur  |  "
@@ -183,6 +185,9 @@ def parse_bericht(path) -> dict:
     b["tarifschema"] = _rx(r"^Schema\s+(\S+)", t, cast=str)
     b["ht_preis"] = _rx(r"HT-Preis\s+(.+?CHF/kWh)", t, cast=str)
     b["nt_preis"] = _rx(r"NT-Preis\s+(.+?CHF/kWh)", t, cast=str)
+    b["abgaben_ht"] = _rx(r"Netz \+ Abgaben HT\s+(.+?CHF/kWh)", t, cast=str)
+    b["abgaben_nt"] = _rx(r"Netz \+ Abgaben NT\s+(.+?CHF/kWh)", t, cast=str)
+    b["netzentgelt"] = _rx(r"^Netzentgelt Speicher\s+([A-Za-zÄÖÜäöü].+)$", t, cast=str)
     b["ht_fenster"] = _rx(r"HT-Zeitfenster\s+(.+)$", t, cast=str)
     b["ht_tage"] = _rx(r"HT-Tage\s+(.+)$", t, cast=str)
     b["pv_schema"] = _rx(r"PV-Schema\s+(\S+)", t, cast=str)
@@ -198,6 +203,8 @@ def parse_bericht(path) -> dict:
     b["rte_pct"] = _rx(r"Rundwirkungsgrad.*?\s" + NUM + r"\s*%", t)
     b["soc_min"] = _rx(r"SOC-Betriebsgrenzen\s+" + NUM + r"\s*%", t)
     b["soc_max"] = _rx(r"SOC-Betriebsgrenzen\s+[\d.]+\s*%\s*–\s*" + NUM + r"\s*%", t)
+    m_nb = re.search(r"Netz-Grenzen Batterie \(Einspeisung / Bezug\)\s+" + NUM + r"\s*kW\s*/\s*" + NUM + r"\s*kW", t)
+    b["bat_einspeisung_kw"], b["bat_bezug_kw"] = (_f(m_nb.group(1)), _f(m_nb.group(2))) if m_nb else (None, None)
     b["netz_standort"] = _rx(r"Netz-Grenzen Standort.*?\)\s+(.+)$", t, cast=str)
     b["last_mwh"] = _rx(r"Last \(Jahreslast\)\s+" + NUM + r"\s*MWh", t)
     b["leistungspreis"] = _rx(r"Peak-Shaving\s+aktiv,?\s*\(?" + NUM + r"\s*CHF/kW/Monat", t)
@@ -205,7 +212,8 @@ def parse_bericht(path) -> dict:
     b["srl_preise"] = _rx(r"Preise Sekundärregelleistung \(SRL\)\s+(.+)$", t, cast=str)
 
     e = {}
-    for key in ["Eigenverbrauchsoptimierung", "Einspeiseoptimierung", "Peak-Shaving", "Arbitrage", "SRL"]:
+    for key in ["Eigenverbrauchsoptimierung", "Einspeiseoptimierung", "Peak-Shaving", "Arbitrage", "SRL",
+                "Netzentgelt Speicher"]:
         e[key] = _rx(rf"^{re.escape(key)}\s+{NUM}\s*CHF\s*$", t, default=0.0)
     b["einnahmen"] = e
     b["total_einnahmen"] = _rx(r"Total Einnahmen\s+" + NUM + r"\s*CHF", t)
@@ -359,7 +367,10 @@ def sizing(df: pd.DataFrame, ziel_roi: float, p_max: float | None = None) -> dic
     return dict(
         df=df, z=z, caps=caps, rates=rates, best_net=best_net, best_roi=best_roi,
         ausgewogen=ausgewogen, ziel_roi=ziel_roi, p_max=p_max, ausgeschlossen=ausgeschlossen,
-        a_gleich_e=gleich(ausgewogen, best_net), a_gleich_r=gleich(ausgewogen, best_roi),
+        ziel_erreicht=len(kand) > 0,
+        a_gleich_e=len(kand) > 0 and gleich(ausgewogen, best_net), a_gleich_r=gleich(ausgewogen, best_roi),
+        r_gleich_e=gleich(best_roi, best_net),
+        netz_am_rand=ausgeschlossen > 0 and best_net.leistung_kw >= z.leistung_kw.max() - 1e-6,
         dominante_crate=dom[0] if len(dom) == 1 else None,
         rand_optimum=bool(best_net.kapazitaet_kwh == max(caps)) and ausgeschlossen == 0,
         netz_begrenzt=ausgeschlossen > 0,
@@ -492,7 +503,9 @@ def chart_waterfall(b, k: Kennzahlen, path):
     cum = 0
     for n, v in items:
         labels.append({"SRL": "SRL", "Eigenverbrauchsoptimierung": "Eigen-\nverbrauch",
-                       "Peak-Shaving": "Peak-\nShaving", "Übrige": "Übrige"}.get(n, n))
+                       "Peak-Shaving": "Peak-\nShaving", "Übrige": "Übrige",
+                       "Einspeiseoptimierung": "Einspeise-\noptimierung",
+                       "Netzentgelt Speicher": "Netz-\nentgelt"}.get(n, n))
         starts.append(cum); heights.append(v); cols.append(MODUL_FARBEN[n]); cum += v
     cum = b["total_einnahmen"]  # gemeldeter Wert (Rundungsdifferenzen der Module)
     labels.append("Operativer\nErtrag"); starts.append(0); heights.append(cum); cols.append(C["ink"])
@@ -578,51 +591,128 @@ def chart_lastspitzen(ohne, mit, path):
 
 
 def chart_schema(b, k, path):
-    """Systemschema. Zeigt nur vorhandene Komponenten (PV-Anlage nur bei DC-Leistung > 0,
-    Verbraucher nur mit Lastgang) und beschriftet die Flüsse mit den aktiven Anwendungen."""
+    """Systemschema mit einem Pfeil pro Produkt und Energiefluss.
+    Farben = Produktfarben (wie Ringdiagramm/Wasserfall), Beschriftung = Energiefluss.
+    Komponenten und Flüsse erscheinen nur, wenn sie vorhanden bzw. zulässig sind."""
+    from matplotlib.lines import Line2D
     pv, last = pv_da(b), last_da(b)
     m = k.module
-    y_net = 2.0
-    ytop = 4.0 if pv else 2.75
-    fig, ax = plt.subplots(figsize=(7.2, 2.9 * ytop / 4.0))
-    ax.set_xlim(0, 10); ax.set_ylim(0, ytop); ax.axis("off")
+    aktiv = lambda key: m.get(key, 0) > 0
+    einsp, bezug = b.get("bat_einspeisung_kw"), b.get("bat_bezug_kw")
+    bat_an_netz = einsp is None or einsp > 0          # Batterie darf ins Netz einspeisen
+    netz_an_bat = bezug is None or bezug > 0          # Batterie darf aus dem Netz laden
 
-    def node(x, y, titel, wert, farbe, w=2.3, h=1.05):
-        ax.add_patch(FancyBboxPatch((x - w / 2, y - h / 2), w, h, boxstyle="round,pad=0.02,rounding_size=0.18",
-                                    fc="white", ec=C["line"], lw=1.0, zorder=3))
-        ax.add_patch(FancyBboxPatch((x - w / 2, y - h / 2), 0.14, h, boxstyle="round,pad=0,rounding_size=0.07",
-                                    fc=farbe, ec="none", zorder=4))
-        ax.text(x - w / 2 + 0.32, y + 0.17, titel, fontsize=9.5, fontweight="bold", color=C["ink"], va="center", zorder=5)
-        ax.text(x - w / 2 + 0.32, y - 0.20, wert, fontsize=8.5, color=C["grey"], va="center", zorder=5)
+    pos = {"Batterie": (5.0, 0.5), "Netz": (0.95, 2.55), "Verbraucher": (9.05, 2.55), "PV": (5.0, 4.45)}
+    W_, H_ = 1.85, 0.9
 
-    def arr(p1, p2, farbe, txt=None, both=False, off=(0, 0.16)):
-        ax.add_patch(FancyArrowPatch(p1, p2, arrowstyle="<|-|>" if both else "-|>", mutation_scale=11,
-                                     color=farbe, lw=1.8, zorder=2))
-        if txt:
-            ax.text((p1[0] + p2[0]) / 2 + off[0], (p1[1] + p2[1]) / 2 + off[1], txt, fontsize=7.5,
-                    color=farbe, ha="center", zorder=6, bbox=dict(fc="white", ec="none", pad=1.2))
-
-    # Batterie unten mittig, Netz links, Verbraucher rechts, PV oben (falls vorhanden)
-    xb = 5.0 if last else 6.2
-    node(xb, 0.65, "Batteriespeicher", f"{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh", C["dark"])
-    node(1.25, y_net, "Stromnetz", "Bezug & Rücklieferung", C["blue"])
-    if last:
-        node(8.75, y_net, "Verbraucher", f"{num(b['last_mwh'], 1)} MWh/Jahr", C["mid"])
-        ax.add_patch(FancyArrowPatch((2.45, y_net), (7.55, y_net), arrowstyle="-|>", mutation_scale=11,
-                                     color=C["blue"], lw=1.4, ls=(0, (4, 3)), zorder=1))
-        ax.text(3.35, y_net + 0.12, "Netzbezug", fontsize=7.5, color=C["blue"], ha="center",
-                bbox=dict(fc="white", ec="none", pad=1.2), zorder=6)
-        lokal = [n for key, n in (("Eigenverbrauchsoptimierung", "Eigenverbrauch"), ("Peak-Shaving", "Peak-Shaving"))
-                 if m.get(key, 0) > 0]
-        arr((6.2, 0.8), (7.75, 1.45), C["dark"], "\n& ".join(lokal) if lokal else "Versorgung", off=(0.35, -0.35))
-    netz_txt = " · ".join(n for key, n in (("SRL", "SRL"), ("Arbitrage", "Arbitrage")) if m.get(key, 0) > 0)
-    arr((2.25, 1.45), (xb - 1.2, 0.8), C["dark"], netz_txt or "Laden / Entladen", both=True, off=(-0.35, -0.3))
+    # Flüsse: (von, nach, Beschriftung, Farbe, Produkt, beidseitig, gestrichelt)
+    fl = []
+    PV_C, NETZ_C = C["amber"], C["blue"]
+    OHNE_C = "#9AA59F"                              # Flüsse, die auch ohne Batterie stattfinden
+    if pv and last:
+        fl.append(("PV", "Verbraucher", "Direktverbrauch", OHNE_C, "ohne Batterie", False, False))
     if pv:
-        node(5.0, 3.35, "PV-Anlage", f"{num(b['pv_kwp'])} kWp", C["amber"])
-        if last:
-            arr((6.2, 3.2), (7.75, 2.55), C["amber"], "Direktverbrauch", off=(0.25, 0.1))
-        arr((5.0, 2.8), (5.0, 1.2), C["amber"], "Laden", off=(0.42, 0.5))
-        arr((3.8, 3.2), (2.25, 2.55), C["amber"], "Einspeisung", off=(-0.25, 0.1))
+        fl.append(("PV", "Netz", "Einspeisung PV", OHNE_C, "ohne Batterie", False, False))
+    if last:
+        fl.append(("Netz", "Verbraucher", "Netzbezug", OHNE_C, "ohne Batterie", False, True))
+    if aktiv("Eigenverbrauchsoptimierung") and last:
+        fe = MODUL_FARBEN["Eigenverbrauchsoptimierung"]
+        if pv:
+            fl.append(("PV", "Batterie", "Überschuss laden", fe, "Eigenverbrauch", False, False))
+        elif netz_an_bat:
+            fl.append(("Netz", "Batterie", "laden für Eigenverbrauch", fe, "Eigenverbrauch", False, False))
+        fl.append(("Batterie", "Verbraucher", "Entladen statt Netzbezug", fe, "Eigenverbrauch", False, False))
+    if aktiv("Peak-Shaving") and peak_relevant(b):
+        fl.append(("Batterie", "Verbraucher", "Entladen bei Lastspitzen", MODUL_FARBEN["Peak-Shaving"],
+                   "Peak-Shaving", False, False))
+    if aktiv("Einspeiseoptimierung") and pv and bat_an_netz:
+        fe = MODUL_FARBEN["Einspeiseoptimierung"]
+        fl.append(("PV", "Batterie", "laden bei tiefen Preisen", fe, "Einspeiseoptimierung", False, False))
+        fl.append(("Batterie", "Netz", "einspeisen bei hohen Preisen", fe, "Einspeiseoptimierung", False, False))
+    if aktiv("Arbitrage") and bat_an_netz and netz_an_bat:
+        fe = MODUL_FARBEN["Arbitrage"]
+        fl.append(("Netz", "Batterie", "günstig laden", fe, "Arbitrage", False, False))
+        fl.append(("Batterie", "Netz", "teuer zurückspeisen", fe, "Arbitrage", False, False))
+    if aktiv("SRL"):   # Regelleistung wird immer in beide Richtungen vorgehalten
+        fl.append(("Netz", "Batterie", "SRL-Abrufe (±)", MODUL_FARBEN["SRL"], "SRL", True, False))
+
+    knoten = {"Batterie", "Netz"} | ({"PV"} if pv else set()) | ({"Verbraucher"} if last else set())
+    ytop = 5.0 if pv else 3.15
+    fig, ax = plt.subplots(figsize=(7.2, 3.9 * ytop / 5.0))
+    ax.set_xlim(0, 10); ax.set_ylim(-0.05, ytop); ax.axis("off")
+
+    def node(name, titel, wert, farbe):
+        x, y = pos[name]
+        ax.add_patch(FancyBboxPatch((x - W_ / 2, y - H_ / 2), W_, H_, boxstyle="round,pad=0.02,rounding_size=0.18",
+                                    fc="white", ec=C["line"], lw=1.0, zorder=3))
+        ax.add_patch(FancyBboxPatch((x - W_ / 2, y - H_ / 2), 0.14, H_, boxstyle="round,pad=0,rounding_size=0.07",
+                                    fc=farbe, ec="none", zorder=4))
+        ax.text(x - W_ / 2 + 0.28, y + 0.15, titel, fontsize=9.2, fontweight="bold", color=C["ink"], va="center", zorder=5)
+        ax.text(x - W_ / 2 + 0.28, y - 0.18, wert, fontsize=8.0, color=C["grey"], va="center", zorder=5)
+
+    node("Batterie", "Batteriespeicher", f"{num(b['bat_kw'])} kW / {num(b['bat_kwh'])} kWh", C["dark"])
+    netz_bezug = last or netz_an_bat
+    node("Netz", "Stromnetz", "Bezug & Rücklieferung" if netz_bezug else "Rücklieferung", NETZ_C)
+    if last:
+        node("Verbraucher", "Verbraucher", f"{num(b['last_mwh'], 1)} MWh/Jahr", C["mid"])
+    if pv:
+        node("PV", "PV-Anlage", f"{num(b['pv_kwp'])} kWp", PV_C)
+
+    def rand(von, nach):
+        """Start-/Endpunkt am Kastenrand entlang der Verbindungslinie."""
+        (x1, y1), (x2, y2) = pos[von], pos[nach]
+        dx, dy = x2 - x1, y2 - y1
+        t = min((W_ / 2 + 0.08) / abs(dx) if dx else 9, (H_ / 2 + 0.08) / abs(dy) if dy else 9)
+        return (x1 + dx * t, y1 + dy * t), (x2 - dx * t, y2 - dy * t)
+
+    # Flüsse je Knotenpaar gruppieren -> parallele Pfeile
+    paare = {}
+    for f_ in fl:
+        if f_[0] in knoten and f_[1] in knoten:
+            paare.setdefault(frozenset(f_[:2]), []).append(f_)
+    for gruppe in paare.values():
+        n = len(gruppe)
+        a_ref, b_ref = sorted(gruppe[0][:2])                      # feste Bezugsrichtung der Gruppe
+        p1, p2 = rand(a_ref, b_ref)
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        lng = math.hypot(dx, dy)
+        ux, uy = dy / lng, -dx / lng                             # Normale (Richtung der arc3-Biegung)
+        for i_, (von, nach, txt, farbe, _, beidseitig, gestrichelt) in enumerate(gruppe):
+            o = i_ - (n - 1) / 2
+            rad = o * min(0.3, 0.9 / max(n, 1)) if n > 1 else 0.0  # parallele Pfeile auseinanderbiegen
+            q1 = (p1[0] + ux * o * 0.08, p1[1] + uy * o * 0.08)
+            q2 = (p2[0] + ux * o * 0.08, p2[1] + uy * o * 0.08)
+            start, ende, r = (q1, q2, rad) if von == a_ref else (q2, q1, -rad)
+            ax.add_patch(FancyArrowPatch(start, ende, arrowstyle="<|-|>" if beidseitig else "-|>", mutation_scale=10,
+                                         connectionstyle=f"arc3,rad={r}", color=farbe, lw=1.6,
+                                         ls=(0, (4, 3)) if gestrichelt else "-", zorder=2))
+            # Beschriftung auf dem Bogen (quadratische Bezierkurve wie arc3), etwas nach aussen versetzt
+            cx = (q1[0] + q2[0]) / 2 + rad * (q2[1] - q1[1])
+            cy = (q1[1] + q2[1]) / 2 - rad * (q2[0] - q1[0])
+
+            def punkt(t):
+                return ((1 - t) ** 2 * q1[0] + 2 * (1 - t) * t * cx + t ** 2 * q2[0],
+                        (1 - t) ** 2 * q1[1] + 2 * (1 - t) * t * cy + t ** 2 * q2[1])
+            mx, my = punkt(0.5)
+            if last and frozenset((von, nach)) == frozenset(("PV", "Batterie")):
+                mx, my = punkt(0.75 if a_ref == "Batterie" else 0.25)  # oberhalb der Netzbezug-Linie
+            seite = 1 if o > 0 else (-1 if o < 0 else 1)
+            if n == 1 and txt == "Netzbezug":                     # nicht in der Mitte über die PV-Pfeile
+                mx, my = q1[0] + (q2[0] - q1[0]) * 0.18, q1[1] + (q2[1] - q1[1]) * 0.18
+            ha = "center"
+            if abs(dx) < abs(dy) and n > 1:                      # steile Bündel: Text seitlich ausrichten
+                ha = "left" if ux * seite > 0 else "right"
+            ax.text(mx + ux * 0.14 * seite, my + uy * 0.14 * seite, txt, fontsize=6.9, color=farbe, ha=ha,
+                    va="center", zorder=6, bbox=dict(fc="white", ec="none", pad=0.5, alpha=0.92))
+
+    # Legende: Produktfarben
+    produkte = []
+    for f_ in fl:
+        if f_[4] not in [p_[0] for p_ in produkte]:
+            produkte.append((f_[4], f_[3], f_[6]))
+    griffe = [Line2D([], [], color=c_, lw=2, ls="--" if g_ else "-", label=p_) for p_, c_, g_ in produkte]
+    ax.legend(handles=griffe, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=min(len(griffe), 6),
+              fontsize=7.2, frameon=False, handlelength=1.6, columnspacing=1.2)
     return _save(fig, path)
 
 
@@ -989,6 +1079,12 @@ def ganzjahr(b):
         return True
 
 
+def wirkung_relevant(b):
+    """Kapitel 'Wirkung am Standort' nur mit Verbraucher (Lastgang). Ohne Lastgang wirkt die
+    Batterie rein wirtschaftlich (Einspeisezeitpunkt, SRL) -> steht im Kapitel Wirtschaftlichkeit."""
+    return last_da(b)
+
+
 def pv_da(b):
     return (b.get("pv_kwp") or 0) > 0
 
@@ -1025,6 +1121,17 @@ def peak_relevant(b):
     return last_da(b) and bool(b.get("leistungspreis")) and bezug_moeglich(b)
 
 
+def werte_rp(txt):
+    """'Q1=0.120 / ... CHF/kWh' oder '0.090 CHF/kWh' -> Liste in Rp/kWh (None, falls leer)."""
+    if not txt:
+        return None
+    q = quartalspreise(txt)
+    if q:
+        return q
+    zahlen = re.findall(r"=?\s*(-?\d+(?:\.\d+)?)", txt)
+    return [float(z) * 100 for z in zahlen] or None
+
+
 def cfg_label(row):
     return f"{num(row.kapazitaet_kwh)} kWh / {num(row.leistung_kw)} kW"
 
@@ -1034,7 +1141,8 @@ def text_summary(b, k, sz, kunde):
     top = [(n, k.anteile[n]) for n, v in items if v > 0][:3]
     namen = {"SRL": "der Vermarktung von Sekundärregelleistung (SRL)", "Peak-Shaving": "Peak-Shaving",
              "Eigenverbrauchsoptimierung": "der Optimierung des Eigenverbrauchs",
-             "Einspeiseoptimierung": "der Einspeiseoptimierung", "Arbitrage": "Arbitrage"}
+             "Einspeiseoptimierung": "der Einspeiseoptimierung", "Arbitrage": "Arbitrage",
+             "Netzentgelt Speicher": "der Rückerstattung des Netzentgelts"}
     jahr = periode(b)["bez"]
     teile = []
     if auftraggeber(kunde):
@@ -1059,14 +1167,23 @@ def text_summary(b, k, sz, kunde):
             s += ", gefolgt von " + " und ".join(rest)
         s += "."
     if sz is not None:
-        s += (f"<br/><br/>Die Grössenanalyse über {len(sz['df'])} Varianten zeigt: Die höchste Kapitalverzinsung "
-              f"erzielt ein kleiner Speicher ({cfg_label(sz['best_roi'])}, {sz['best_roi'].roi_pct:.0f} %), den höchsten "
-              f"absoluten Gewinn die Variante {cfg_label(sz['best_net'])} ({chf(sz['best_net'].netto_chf)}/Jahr)"
-              + (f", die grösste Variante innerhalb des Netzanschlusses von {num(sz['p_max'])} kW. "
-                 if sz["netz_begrenzt"] else ". ")
-              + (f"Sie erreicht zugleich eine Verzinsung von über {sz['ziel_roi']:g} % und ist damit auch die "
-                 "ausgewogene Lösung." if sz["a_gleich_e"] else
-                 f"Als ausgewogene Lösung bietet sich <b>{cfg_label(sz['ausgewogen'])}</b> an."))
+        R, E = sz["best_roi"], sz["best_net"]
+        netz = (f", die grösste Variante innerhalb des Netzanschlusses von {num(sz['p_max'])} kW"
+                if sz["netz_am_rand"] else "")
+        s += f"<br/><br/>Die Grössenanalyse über {len(sz['df'])} Varianten zeigt: "
+        if sz["r_gleich_e"]:
+            s += (f"Die Variante <b>{cfg_label(E)}</b> erzielt sowohl die höchste Kapitalverzinsung "
+                  f"({E.roi_pct:.0f} %) als auch den höchsten Nettogewinn ({chf(E.netto_chf)}/Jahr){netz}.")
+        else:
+            s += (f"Die höchste Kapitalverzinsung erzielt die Variante {cfg_label(R)} ({R.roi_pct:.0f} %), "
+                  f"den höchsten Nettogewinn die Variante {cfg_label(E)} ({chf(E.netto_chf)}/Jahr){netz}.")
+            if sz["a_gleich_e"]:
+                s += (f" Diese erreicht zugleich mindestens {sz['ziel_roi']:g} % Verzinsung und ist damit auch "
+                      "die ausgewogene Lösung.")
+            elif sz["ziel_erreicht"] and not sz["a_gleich_r"]:
+                s += f" Als ausgewogene Lösung bietet sich <b>{cfg_label(sz['ausgewogen'])}</b> an."
+        if not sz["ziel_erreicht"]:
+            s += f" Die Zielrendite von {sz['ziel_roi']:g} % erreicht keine der untersuchten Varianten."
     return s
 
 
@@ -1081,7 +1198,8 @@ def text_ertragsstruktur(b, k, kunde):
     if net_lo > 0:
         s += (f"Auch wenn die SRL-Erlöse {abs(lo):.0f} % tiefer liegen als im analysierten Zeitraum, bleibt der Speicher mit "
               f"{chf(net_lo)} pro Jahr wirtschaftlich. ")
-    s += "Kapitel 05 zeigt die Wirkung unterschiedlicher Preisniveaus auf Gewinn und Amortisation."
+    s += (f"Kapitel {5 if wirkung_relevant(b) else 4:02d} zeigt die Wirkung unterschiedlicher Preisniveaus "
+          "auf Gewinn und Amortisation.")
     return s
 
 
@@ -1204,12 +1322,26 @@ def seite_ausgangslage(d: Doc, b, k, ch, y=None):
         left.append(("Tarifmodell", tarifname))
     if schema == "HT_NT":
         left.append(("Hochtarif-Zeiten", f"{b.get('ht_tage', '')}, {b.get('ht_fenster', '')}"))
+    abg_ht, abg_nt = werte_rp(b.get("abgaben_ht")), werte_rp(b.get("abgaben_nt"))
     if schema == "HT_NT" and ht and nt:
-        left += [("__qh__", ("Energiepreis in Rp/kWh", ["Q1", "Q2", "Q3", "Q4"])),
-                 ("__q__", ("Hochtarif", [num(v, 1) for v in ht])),
-                 ("__q__", ("Niedertarif", [num(v, 1) for v in nt]))]
+        left += [("__qh__", ("Preise in Rp/kWh", ["Q1", "Q2", "Q3", "Q4"])),
+                 ("__q__", ("Energie HT", [num(v, 1) for v in ht])),
+                 ("__q__", ("Energie NT", [num(v, 1) for v in nt]))]
     elif schema == "HT_NT" and b.get("ht_preis"):
         left += [("Energiepreis HT", b.get("ht_preis")), ("Energiepreis NT", b.get("nt_preis") or "–")]
+    if abg_ht or abg_nt:
+        abg_ht, abg_nt = abg_ht or abg_nt, abg_nt or abg_ht
+        if schema == "HT_NT" and ht and len(abg_ht) == 4 and len(abg_nt) == 4:
+            left += [("__q__", ("Netz + Abgaben HT", [num(v, 1) for v in abg_ht])),
+                     ("__q__", ("Netz + Abgaben NT", [num(v, 1) for v in abg_nt]))]
+        else:
+            txt_ht = " / ".join(num(v, 1) for v in abg_ht)
+            txt_nt = " / ".join(num(v, 1) for v in abg_nt)
+            left.append(("Netz + Abgaben (HT | NT)", f"{txt_ht} | {txt_nt} Rp/kWh" if txt_ht != txt_nt
+                         else f"{txt_ht} Rp/kWh"))
+    if b.get("netzentgelt"):
+        left.append(("Netzentgelt Speicher", "Rückerstattung" if "rückerstattung" in b["netzentgelt"].lower()
+                      else "befreit" if "befreit" in b["netzentgelt"].lower() else b["netzentgelt"]))
     if peak_relevant(b):
         left.append(("Leistungspreis", f"{num(b['leistungspreis'], 2)} CHF/kW/Monat"))
     if pv_da(b):
@@ -1295,6 +1427,11 @@ def seite_methodik(d: Doc, b, k, y=None):
         "Einspeiseoptimierung": "Solarstrom wird bei tiefen Spotpreisen eingespeichert und zu Zeiten höherer Preise "
                                 "ins Netz zurückgeliefert.",
         "Arbitrage": "Netzstrom wird zu günstigen Zeiten bezogen und zu teureren Zeiten zurückgespeist.",
+        "Netzentgelt Speicher": ("Für Strom, den die Batterie aus dem Netz lädt und wieder ins Netz zurückspeist, wird "
+                                 "das Netzentgelt zurückerstattet (Art. 14a StromVG)."
+                                 if "rückerstattung" in (b.get("netzentgelt") or "").lower() else
+                                 "Als Speicher ohne Endverbrauch ist die Batterie beim Laden aus dem Netz vom "
+                                 "Netzentgelt befreit (Art. 14a StromVG)."),
     }
     order = [n for n in sorted(k.module.keys(), key=lambda n: -k.module[n]) if abs(k.module[n]) >= 0.5]
     cw2 = (CW - 5 * mm) / 2
@@ -1465,6 +1602,12 @@ def seite_wirtschaft(d: Doc, b, k, ch, y=None):
                 "Nutzens entsteht nicht durch zeitlich verschobene Energie, sondern durch vorgehaltene Leistung (SRL)"
                 + (" und gesenkte Lastspitzen" if k.module.get("Peak-Shaving", 0) > 0 else "") + ".")
     y -= para(c, txt, M, y, CW, S(8.4, C["grey"]))
+    # Ohne Lastgang entfällt das Kapitel "Wirkung am Standort" -> PV-Hinweis hier
+    if not wirkung_relevant(b) and b.get("wert_pv_abschaltung"):
+        y -= 3 * mm
+        y -= para(c, f"<b>PV-Abregelung.</b> Die Abregelung der PV-Anlage bei negativen Strompreisen hat bereits ohne "
+                     f"Batterie einen Wert von {chf(b['wert_pv_abschaltung'])} pro Jahr. Dieser Wert ist im "
+                     "Batterienutzen nicht enthalten.", M, y, CW, S(8.4, C["grey"]))
     return y
 
 
@@ -1529,8 +1672,9 @@ def seite_dimensionierung(d: Doc, b, sz, ch, y=None):
     y -= img(c, ch["heat"], M, y, CW) + 2 * mm
     texte = {"R": "höchste Kapitalverzinsung",
              "A": f"ausgewogen, höchster Gewinn bei mind. {sz['ziel_roi']:g} % Verzinsung",
-             "E": "höchster Nettogewinn" + (f", erreicht auch mind. {sz['ziel_roi']:g} % Verzinsung"
-                                          if sz["a_gleich_e"] else "")}
+             "E": ("höchste Kapitalverzinsung und höchster Nettogewinn" if sz["r_gleich_e"] else
+                   "höchster Nettogewinn" + (f", erreicht auch mind. {sz['ziel_roi']:g} % Verzinsung"
+                                            if sz["a_gleich_e"] else ""))}
     lg = "   ·   ".join(f"<b>{t}</b> = {texte[t]} ({cfg_label(r)})" for t, r in varianten(sz))
     if sz["netz_begrenzt"]:
         lg += (f"<br/>Grau: Leistung über dem Netzanschluss von {num(sz['p_max'])} kW, "
@@ -1655,12 +1799,13 @@ def seite_empfehlung(d: Doc, b, k, sz, kunde, y=None):
             c.setFillColor(HexColor(C["mid"])); c.circle(M + 1.5 * mm, y - 2.3 * mm, 1.1 * mm, fill=1, stroke=0)
             y -= para(c, p, M + 5 * mm, y, CW - 5 * mm, S(9)) + 2 * mm
         y -= 2 * mm
-        info = {"R": ("Rendite-optimiert", "Kleine Investition mit der höchsten Verzinsung und dem geringsten "
-                                           "absoluten Marktrisiko."),
+        info = {"R": ("Rendite-optimiert", "Höchste Verzinsung des eingesetzten Kapitals."),
                 "A": ("Ausgewogen", f"Hoher Gewinn bei einer Verzinsung von mindestens {sz['ziel_roi']:g} %."),
-                "E": ("Ertrags-maximiert", "Höchster absoluter Gewinn bei der grössten Abhängigkeit von den SRL-Preisen."
-                      if not sz["a_gleich_e"] else
-                      f"Höchster absoluter Gewinn und zugleich mindestens {sz['ziel_roi']:g} % Verzinsung.")}
+                "E": ("Rendite- und ertrags-optimiert" if sz["r_gleich_e"] else "Ertrags-maximiert",
+                      "Höchste Kapitalverzinsung und höchster Nettogewinn." if sz["r_gleich_e"] else
+                      f"Höchster Nettogewinn und zugleich mindestens {sz['ziel_roi']:g} % Verzinsung."
+                      if sz["a_gleich_e"] else
+                      "Höchster Nettogewinn bei der grössten Abhängigkeit von den SRL-Preisen.")}
         karten = [(t, info[t][0], r, info[t][1]) for t, r in varianten(sz)]
         hero_tag = "A" if any(t == "A" for t, *_ in karten) else "E"
         anz = {1: "Empfohlene Variante", 2: "Zwei Varianten zur Auswahl", 3: "Drei Varianten zur Auswahl"}[len(karten)]
@@ -1778,7 +1923,12 @@ def build(bericht, sweep, kunde_json, out):
                        ("projekt.standort", standort(kunde)), ("bericht_datum", kunde.get("bericht_datum"))):
         if not wert:
             qa.append(f"[!! ] Kundendaten fehlen: {pfad} (im Bericht weggelassen)")
-    print("\n".join(["Plausibilitätschecks:"] + qa))
+    if os.environ.get("BATTERIE_KONSOLE", "kompakt").strip().lower() == "voll":
+        print("\n".join(["Plausibilitätschecks:"] + qa))
+    else:
+        offen = [q for q in qa if q.startswith("[!!")]
+        print(f"  Plausibilitätschecks: {sum(q.startswith('[OK') for q in qa)} OK, {len(offen)} offen"
+              + (" (Details in der QA-Datei)" if offen else ""))
     (out.with_name(out.stem + "_QA.txt")).write_text("\n".join(qa), encoding="utf-8")
 
     ch = {
@@ -1798,7 +1948,7 @@ def build(bericht, sweep, kunde_json, out):
     # Abschnitte im Fluss: ein Abschnitt beginnt auf der laufenden Seite, wenn er dort ganz Platz hat.
     abschnitte = [lambda d, y: seite_ausgangslage(d, b, k, ch, y),
                   lambda d, y: seite_methodik(d, b, k, y),
-                  lambda d, y: seite_wirkung(d, b, ch, kunde, y),
+                  *([lambda d, y: seite_wirkung(d, b, ch, kunde, y)] if wirkung_relevant(b) else []),
                   lambda d, y: seite_wirtschaft(d, b, k, ch, y),
                   lambda d, y: seite_risiko(d, b, k, ch, y)]
     if sz is not None:

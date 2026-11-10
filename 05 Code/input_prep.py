@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as dt
+from parameter_layout import zelle, zeile, cache_leeren
 import os
 import re
 import warnings
@@ -161,6 +162,11 @@ COL_SRL_POS = 8
 # Spalte E) und wird hier bewusst NICHT wiederverwendet.
 COL_RUECKLIEFER_BATTERIE = 11
 COL_RUECKLIEFER_BATTERIE_HEADER = "Rückliefertarif_Batterie [CHF/kWh]"
+# NEU (6.11.2026): Netznutzung/Abgaben und Rückerstattungssatz Speicher je Zeitschritt
+COL_ABGABEN = 12
+COL_ABGABEN_HEADER = "Netz + Abgaben [CHF/kWh]"
+COL_RUECKERSTATTUNG = 13
+COL_RUECKERSTATTUNG_HEADER = "Rückerstattung Speicher [CHF/kWh]"
 
 
 # --------------------------------------------------------------------------
@@ -589,6 +595,21 @@ def parse_zeitfenster_liste(raw, feld_name: str) -> list[dt.time]:
     return result
 
 
+def ht_maske(index: pd.DatetimeIndex, tage_ht: int, start_ht_liste, end_ht_liste) -> np.ndarray:
+    """True für Zeitschritte im Hochtarif (HT-Tage ab Montag, HT-Zeitfenster)."""
+    if len(start_ht_liste) != len(end_ht_liste):
+        raise ValueError(
+            f"Startzeit HT hat {len(start_ht_liste)} Zeitfenster, Endzeit HT "
+            f"hat {len(end_ht_liste)} -- die Anzahl muss uebereinstimmen."
+        )
+    is_ht_day = index.weekday < tage_ht
+    times = index.time
+    is_ht_time = np.zeros(len(index), dtype=bool)
+    for start, end in zip(start_ht_liste, end_ht_liste):
+        is_ht_time |= (times >= start) & (times < end)
+    return is_ht_day & is_ht_time
+
+
 def build_ht_nt_bezugstarif(
     index: pd.DatetimeIndex,
     ht_werte: list[float],
@@ -779,6 +800,48 @@ def resolve_rueckliefertarif(
     )
 
 
+def build_abgaben(index: pd.DatetimeIndex, params: dict) -> pd.Series | None:
+    """Netznutzung + Abgaben (CHF/kWh) je Zeitschritt, HT/NT-abhängig; None, wenn nicht erfasst."""
+    ht_raw, nt_raw = params.get("abgaben_ht_raw"), params.get("abgaben_nt_raw")
+    if ht_raw in (None, "") and nt_raw in (None, ""):
+        return None
+    ht = saisonal_werte_zu_serie(parse_saisonal_werte(ht_raw if ht_raw not in (None, "") else nt_raw,
+                                                      "Netz + Abgaben HT"), index)
+    nt = saisonal_werte_zu_serie(parse_saisonal_werte(nt_raw if nt_raw not in (None, "") else ht_raw,
+                                                      "Netz + Abgaben NT"), index)
+    maske = ht_maske(index, params["tage_ht"],
+                     parse_zeitfenster_liste(params["start_ht_raw"], "Parameter!C10 (Startzeit HT)"),
+                     parse_zeitfenster_liste(params["end_ht_raw"], "Parameter!C11 (Endzeit HT)"))
+    return pd.Series(np.where(maske, ht.values, nt.values), index=index, name="Netz + Abgaben [CHF/kWh]")
+
+
+def netzentgelt_modus(raw) -> str:
+    """'keine' | 'rueckerstattung' | 'befreit' (Parameter 'Netzentgelt Speicher')."""
+    t = str(raw or "").strip().lower()
+    if t.startswith("rück") or t.startswith("rueck"):
+        return "rueckerstattung"
+    if t.startswith("befrei"):
+        return "befreit"
+    return "keine"
+
+
+def build_rueckerstattung(index: pd.DatetimeIndex, params: dict, abgaben: pd.Series | None) -> pd.Series:
+    """Rückerstattungs- bzw. Befreiungssatz (CHF/kWh) je Zeitschritt für Netzladung der Batterie.
+    keine -> 0 | befreit -> Netz + Abgaben | Rückerstattung -> Tarif des VNB (leer = Netz + Abgaben)."""
+    modus = params.get("netzentgelt_speicher", "keine")
+    null = pd.Series(0.0, index=index)
+    if modus == "keine":
+        return null
+    basis = abgaben if abgaben is not None else null
+    if modus == "befreit":
+        return basis.copy()
+    ht_raw, nt_raw = params.get("rueck_ht_raw"), params.get("rueck_nt_raw")
+    if ht_raw in (None, "") and nt_raw in (None, ""):
+        return basis.copy()
+    tmp = dict(params, abgaben_ht_raw=ht_raw, abgaben_nt_raw=nt_raw)
+    return build_abgaben(index, tmp)
+
+
 def build_tariffs(
     index: pd.DatetimeIndex,
     params: dict,
@@ -851,6 +914,14 @@ def build_tariffs(
 
     else:
         raise ValueError(f"Unbekanntes Tarifschema: {schema!r}")
+
+    # NEU (Beat, 6.11.2026): Bezugstarif = ENERGIE (nach Tarifschema) + NETZNUTZUNG/ABGABEN
+    # (Arbeitspreis: Netznutzung, SDL, Netzzuschlag, Gemeindeabgaben ...), unabhängig vom
+    # Schema. HT/NT-Zeitfenster wie Parameter!C9-C11. Leer = 0 (alte Inputs unverändert).
+    abgaben = build_abgaben(index, params)
+    if abgaben is not None:
+        bezug = bezug + abgaben.values
+        print(f"  Bezugstarif = Energie + Netznutzung/Abgaben (Ø Abgaben {abgaben.mean() * 100:.2f} Rp/kWh)")
 
     if params["spot_abschlag_lieferung"] < 0:
         warnings.warn(
@@ -973,6 +1044,7 @@ def _check_label(ws_param, row: int, expected) -> None:
     (Zeilen verschoben/eingefuegt -- ist in diesem Projekt schon mehrfach
     passiert) -- lieber ein klarer Fehler hier als falsche Zahlen in der
     Optimierung."""
+    row = zeile(ws_param, row)          # historische Zeile -> tatsächliche Zeile (Layout-unabhängig)
     actual = ws_param[f"A{row}"].value
     actual_norm = str(actual).strip().lower() if actual is not None else ""
     erwartet = [expected] if isinstance(expected, str) else list(expected)
@@ -1014,36 +1086,36 @@ def read_params(ws_param) -> dict:
 
     # NEU: Kundenfaktor (Zeile 52) -- fehlt bei alten Inputfiles, dann Fallback
     # auf Hilfen_Listen!N1 / 0.5 (siehe main()).
-    a52 = ws_param["A52"].value
+    a52 = ws_param[zelle(ws_param, "A52")].value
     kundenfaktor = None
     if a52 is not None and "kundenfaktor" in str(a52).lower():
-        kundenfaktor = ws_param["C52"].value
+        kundenfaktor = ws_param[zelle(ws_param, "C52")].value
 
     return {
-        "beginn": ws_param["C2"].value,
-        "ende": ws_param["C3"].value,
-        "tarifschema": ws_param["C5"].value,
-        "ht_raw": ws_param["C6"].value,
-        "nt_raw": ws_param["C7"].value,
-        "netznutzung_leistung": ws_param["C8"].value,
-        "tage_ht": int(ws_param["C9"].value),
-        "start_ht_raw": ws_param["C10"].value,
-        "end_ht_raw": ws_param["C11"].value,
-        "spot_abschlag_lieferung": ws_param["C12"].value,
-        "spot_aufschlag_bezug": ws_param["C13"].value,
-        "rueckliefer_pv_schema": ws_param["C14"].value,
-        "rueckliefer_pv_hkn_raw": ws_param["C15"].value,
-        "rueckliefer_pv_floor": ws_param["C16"].value,
-        "rueckliefer_pv_fixtarif": ws_param["C17"].value,
-        "rueckliefer_batterie_schema": ws_param["C19"].value,
-        "rueckliefer_batterie_hkn_raw": ws_param["C20"].value,
-        "rueckliefer_batterie_floor": ws_param["C21"].value,
-        "rueckliefer_batterie_fixtarif": ws_param["C22"].value,
-        "dc_leistung": ws_param["C25"].value,
-        "produktions_input": ws_param["C26"].value,
-        "srl_teilnahme": ws_param["C49"].value,
-        "srl_preisschema": ws_param["C50"].value,
-        "srl_energie_aufschlag": ws_param["C51"].value,
+        "beginn": ws_param[zelle(ws_param, "C2")].value,
+        "ende": ws_param[zelle(ws_param, "C3")].value,
+        "tarifschema": ws_param[zelle(ws_param, "C5")].value,
+        "ht_raw": ws_param[zelle(ws_param, "C6")].value,
+        "nt_raw": ws_param[zelle(ws_param, "C7")].value,
+        "netznutzung_leistung": ws_param[zelle(ws_param, "C8")].value,
+        "tage_ht": int(ws_param[zelle(ws_param, "C9")].value),
+        "start_ht_raw": ws_param[zelle(ws_param, "C10")].value,
+        "end_ht_raw": ws_param[zelle(ws_param, "C11")].value,
+        "spot_abschlag_lieferung": ws_param[zelle(ws_param, "C12")].value,
+        "spot_aufschlag_bezug": ws_param[zelle(ws_param, "C13")].value,
+        "rueckliefer_pv_schema": ws_param[zelle(ws_param, "C14")].value,
+        "rueckliefer_pv_hkn_raw": ws_param[zelle(ws_param, "C15")].value,
+        "rueckliefer_pv_floor": ws_param[zelle(ws_param, "C16")].value,
+        "rueckliefer_pv_fixtarif": ws_param[zelle(ws_param, "C17")].value,
+        "rueckliefer_batterie_schema": ws_param[zelle(ws_param, "C19")].value,
+        "rueckliefer_batterie_hkn_raw": ws_param[zelle(ws_param, "C20")].value,
+        "rueckliefer_batterie_floor": ws_param[zelle(ws_param, "C21")].value,
+        "rueckliefer_batterie_fixtarif": ws_param[zelle(ws_param, "C22")].value,
+        "dc_leistung": ws_param[zelle(ws_param, "C25")].value,
+        "produktions_input": ws_param[zelle(ws_param, "C26")].value,
+        "srl_teilnahme": ws_param[zelle(ws_param, "C49")].value,
+        "srl_preisschema": ws_param[zelle(ws_param, "C50")].value,
+        "srl_energie_aufschlag": ws_param[zelle(ws_param, "C51")].value,
         "srl_kundenfaktor": kundenfaktor,
     }
 
@@ -1326,7 +1398,7 @@ def _zahl(v):
 
 
 def pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path):
-    wahl = str(ws_param["C26"].value or "").strip().lower()
+    wahl = str(ws_param[zelle(ws_param, "C26")].value or "").strip().lower()
     f_werte = pd.to_numeric(
         pd.Series([ws_zeit.cell(row=r, column=COL_PV_PROFIL).value for r in range(2, n_rows + 1)]),
         errors="coerce")
@@ -1335,12 +1407,12 @@ def pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path):
     if f_werte.notna().any() and f_werte.fillna(0).sum() > 0:
         if wahl != "profil_zeitreihe":
             print(f"  PV: Messprofil in Zeitreihen!F gefunden -- übersteuert '{ws_param['C26'].value}'.")
-        ws_param["C26"] = "Profil_Zeitreihe"
-        ws_param[PV_QUELLE_CELL] = "Messprofil (Zeitreihe)"
+        ws_param[zelle(ws_param, "C26")] = "Profil_Zeitreihe"
+        ws_param[zelle(ws_param, PV_QUELLE_CELL)] = "Messprofil (Zeitreihe)"
         return
 
     if wahl != "standortprofil":
-        ws_param[PV_QUELLE_CELL] = "Standardprofil × DC-Leistung"
+        ws_param[zelle(ws_param, PV_QUELLE_CELL)] = "Standardprofil × DC-Leistung"
         return
 
     # 2) Standortprofil
@@ -1357,10 +1429,10 @@ def pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path):
 
     def rueckfall(grund):
         print(f"  WARNUNG PV-Standortprofil: {grund} -> Standardprofil × DC-Leistung.")
-        ws_param["C26"] = "normiert"
-        if kwp_summe and not _zahl(ws_param["C25"].value):
-            ws_param["C25"] = kwp_summe
-        ws_param[PV_QUELLE_CELL] = f"Standardprofil × DC-Leistung (Standortprofil nicht möglich: {grund})"
+        ws_param[zelle(ws_param, "C26")] = "normiert"
+        if kwp_summe and not _zahl(ws_param[zelle(ws_param, "C25")].value):
+            ws_param[zelle(ws_param, "C25")] = kwp_summe
+        ws_param[zelle(ws_param, PV_QUELLE_CELL)] = f"Standardprofil × DC-Leistung (Standortprofil nicht möglich: {grund})"
 
     if not plz:
         return rueckfall("keine PLZ im Block 'PV-Standort'")
@@ -1378,15 +1450,15 @@ def pv_profil_hierarchie(ws_param, ws_zeit, n_rows, index, input_path):
 
     for r, v in zip(range(2, n_rows + 1), profil.values):
         ws_zeit.cell(row=r, column=COL_PV_PROFIL).value = float(v)
-    dc_alt = _zahl(ws_param["C25"].value)
+    dc_alt = _zahl(ws_param[zelle(ws_param, "C25")].value)
     if dc_alt and abs(dc_alt - kwp_summe) > 0.5:
         print(f"  Hinweis: DC-Leistung C25 ({dc_alt:g} kWp) durch Summe der Flächen ersetzt ({kwp_summe:g} kWp).")
-    ws_param["C25"] = kwp_summe
-    ws_param["C26"] = "Profil_Zeitreihe"
+    ws_param[zelle(ws_param, "C25")] = kwp_summe
+    ws_param[zelle(ws_param, "C26")] = "Profil_Zeitreihe"
     flaechen_txt = ", ".join(f"{f.kwp:g} kWp {f.neigung:g}°/{f.ausrichtung:+g}°" for f in flaechen)
     print(f"  Flächen: {flaechen_txt}")
     # kurz halten -- erscheint als Zeile im PDF-Bericht
-    ws_param[PV_QUELLE_CELL] = (
+    ws_param[zelle(ws_param, PV_QUELLE_CELL)] = (
         f"Standortprofil, MeteoSwiss {info['station']} ({info['dist_km']:.0f} km), "
         f"{info['spez_ertrag']:.0f} kWh/kWp")
 
@@ -1411,6 +1483,7 @@ def main(
     wb = load_workbook(input_path, data_only=False)          # zum Beschreiben/Speichern
 
     ws_param = wb["Parameter"]
+    cache_leeren()
     ws_param_vals = wb_values["Parameter"]
     ws_zeit = wb["Zeitreihen"]
     ws_zeit_vals = wb_values["Zeitreihen"]
@@ -1588,7 +1661,7 @@ def main(
     # als params["swissix_quelle"] und output_create.build_input_summary_rows()
     # zeigt sie auf der Eingabeparameter-Seite an.
     if swissix_quelle is not None:
-        ws_param["E5"] = swissix_quelle
+        ws_param[zelle(ws_param, "E5")] = swissix_quelle
 
     # NEU (kritischer Plausibilitaets-Check, gefunden bei Beats
     # Inputs_BAT_standalone.xlsx-Lauf): die von Hand eingetragenen SwissIX-
@@ -1630,6 +1703,12 @@ def main(
         print(f"  Solar_RMP.xlsx nicht gefunden unter {rmp_path} -- wird nur gebraucht, falls RMP/RMP_Floor gewaehlt ist.")
         rmp_lookup = None
 
+    _p = _parameter_nach_label(ws_param)
+    params["abgaben_ht_raw"] = _p.get("netz + abgaben ht")
+    params["abgaben_nt_raw"] = _p.get("netz + abgaben nt")
+    params["rueck_ht_raw"] = _p.get("rückerstattungstarif ht")
+    params["rueck_nt_raw"] = _p.get("rückerstattungstarif nt")
+    params["netzentgelt_speicher"] = netzentgelt_modus(_p.get("netzentgelt speicher"))
     print("Berechne Rueckliefer-/Bezugstarif ...")
     ruecklieferung_pv, ruecklieferung_batterie, bezug = build_tariffs(
         index, params, swissix, existing_bezug, rmp_lookup
@@ -1640,6 +1719,18 @@ def main(
     for r, v in zip(range(2, n_rows + 1), bezug.values):
         if pd.notna(v):
             ws_zeit.cell(row=r, column=COL_BEZUG).value = float(v)
+    # Netz + Abgaben und Rückerstattungssatz Speicher als eigene Spalten (für Optimierung/Bericht)
+    abgaben = build_abgaben(index, params)
+    rueck = build_rueckerstattung(index, params, abgaben)
+    ws_zeit.cell(row=1, column=COL_ABGABEN).value = COL_ABGABEN_HEADER
+    ws_zeit.cell(row=1, column=COL_RUECKERSTATTUNG).value = COL_RUECKERSTATTUNG_HEADER
+    for r, a_, z_ in zip(range(2, n_rows + 1),
+                         (abgaben.values if abgaben is not None else np.zeros(len(index))), rueck.values):
+        ws_zeit.cell(row=r, column=COL_ABGABEN).value = float(a_)
+        ws_zeit.cell(row=r, column=COL_RUECKERSTATTUNG).value = float(z_)
+    if params["netzentgelt_speicher"] != "keine":
+        print(f"  Netzentgelt Speicher: {params['netzentgelt_speicher']} "
+              f"(Ø {rueck.mean() * 100:.2f} Rp/kWh auf Netzladung der Batterie)")
     # NEU: eigene Spalte K fuer den Batterie-Rueckliefertarif (siehe
     # COL_RUECKLIEFER_BATTERIE weiter oben) -- Header wird hier automatisch
     # gesetzt, falls noch nicht vorhanden (Beats Original-Excel hat diese
@@ -1676,7 +1767,7 @@ def main(
     srl_schema, srl_hinweis = normalize_srl_schema(params["srl_preisschema"])
     if srl_hinweis:
         warnings.warn(srl_hinweis)
-    ws_param["C50"] = srl_schema  # normalisiert zurueckschreiben (-> Auswertung)
+    ws_param[zelle(ws_param, "C50")] = srl_schema  # normalisiert zurueckschreiben (-> Auswertung)
 
     aufschlag = params["srl_energie_aufschlag"]
     aufschlag = 0.0 if aufschlag is None else float(aufschlag)
@@ -1717,7 +1808,7 @@ def main(
     for r, vn, vp in zip(range(2, n_rows + 1), srl_neg.values, srl_pos.values):
         ws_zeit.cell(row=r, column=COL_SRL_NEG).value = float(vn)
         ws_zeit.cell(row=r, column=COL_SRL_POS).value = float(vp)
-    ws_param[SRL_QUELLE_CELL] = srl_quelle_text(srl_schema, srl_info, kf, aufschlag)
+    ws_param[zelle(ws_param, SRL_QUELLE_CELL)] = srl_quelle_text(srl_schema, srl_info, kf, aufschlag)
     print(
         f"  SRL {srl_schema}: Mittel NEG {srl_neg.mean():.5f} / POS {srl_pos.mean():.5f} CHF/kWh "
         f"(inkl. Kundenfaktor {srl_info['faktor']:g} und Energie-Aufschlag +{aufschlag * 100:g}%)."

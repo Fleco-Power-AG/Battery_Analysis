@@ -335,6 +335,7 @@ MODUL_REIHENFOLGE = [
     "SRL (Post-hoc-Mehrertrag)",
     "SRL (Teil der Optimierung)",
     "Peak-Shaving",
+    "Netzentgelt Speicher",
     "Total (operativ)",
 ]
 
@@ -376,6 +377,7 @@ EINNAHMEN_LABELS = {
     "Arbitrage der Batterie": "Arbitrage",
     "SRL (Post-hoc-Mehrertrag)": "SRL",
     "SRL (Teil der Optimierung)": "SRL",
+    "Netzentgelt Speicher": "Netzentgelt Speicher",
 }
 
 
@@ -1455,6 +1457,7 @@ _MODUL_GLOSSAR = [
     ("Arbitrage", "Netzenergie wird günstig geladen und teurer exportiert."),
     ("SRL", "separat vermarktete Sekundärregelleistung."),
     ("Peak-Shaving", "reduziert die monatliche Bezugsspitze."),
+    ("Netzentgelt Speicher", "Rückerstattung bzw. Befreiung vom Netzentgelt auf Netzladung (Art. 14a StromVG)."),
 ]
 
 
@@ -1866,6 +1869,34 @@ def build_input_summary_rows(
         else:
             rows.append({"label": "Hinweis", "value": "historischer Bezugstarif (Zeitreihen)"})
 
+        # NEU (Beat, 6.11.2026): Netznutzung + Abgaben, bei jedem Schema zum Energiepreis addiert
+        def _werte(raw):
+            if raw in (None, ""):
+                return None
+            try:
+                return [float(str(x).strip()) for x in str(raw).replace(";", ",").split(",") if str(x).strip()]
+            except ValueError:
+                return None
+        abg_ht = _werte(params.get("abgaben_ht_raw"))
+        abg_nt = _werte(params.get("abgaben_nt_raw")) or abg_ht
+        if abg_ht or abg_nt:
+            rows += [
+                {"label": "Netz + Abgaben HT", "value": _fmt_saisonal_werte(
+                    params.get("abgaben_ht_raw") or params.get("abgaben_nt_raw"), "CHF/kWh", 3)},
+                {"label": "Netz + Abgaben NT", "value": _fmt_saisonal_werte(
+                    params.get("abgaben_nt_raw") or params.get("abgaben_ht_raw"), "CHF/kWh", 3)},
+            ]
+            if schema_normalisiert != "HT_NT":
+                rows += [
+                    {"label": "HT-Zeitfenster", "value": _fmt_ht_zeitfenster(params.get("start_ht"), params.get("end_ht"))},
+                    {"label": "HT-Tage", "value": _fmt_ht_tage(params.get("tage_ht"))},
+                ]
+        _ne = params.get("netzentgelt_speicher", "keine")
+        if _ne != "keine":
+            rows.append({"label": "Netzentgelt Speicher", "value": {
+                "rueckerstattung": "Rückerstattung (Speicher mit Endverbrauch)",
+                "befreit": "befreit (Speicher ohne Endverbrauch)"}.get(_ne, _ne)})
+
     # NEU (Beats Erweiterung: PV und Batterie koennen unterschiedlich
     # vermarktet werden -- unabhaengig vom obigen Bezugsschema, siehe
     # input_prep.py::resolve_rueckliefertarif()). PV zeigt weiterhin nur die
@@ -2019,6 +2050,7 @@ _ERTRAG_COLORS = {
     "Peak-Shaving": "#E69F00",
     "Eigenverbrauchsoptimierung": "#CC79A7",
     "Einspeiseoptimierung": "#D55E00",
+    "Netzentgelt Speicher": "#56B4E9",
 }
 
 
@@ -2094,6 +2126,8 @@ def build_cumulative_ertrag_table(
         },
         index=idx,
     )
+    if "ertrag_netzentgelt" in anteile:
+        fluesse["Netzentgelt Speicher"] = anteile["ertrag_netzentgelt"].values
 
     tages_summe = fluesse.groupby(fluesse.index.date).sum()
     tages_summe.index = pd.to_datetime(tages_summe.index)
@@ -2384,7 +2418,7 @@ def build_pdf_report(
 
     def _plot_kumulierte_ertraege(cax, kumuliert):
         x = kumuliert.index
-        alle_spalten = list(_ERTRAG_COLORS.keys())
+        alle_spalten = [c for c in _ERTRAG_COLORS if c in kumuliert.columns]  # nur vorhandene Module
 
         # NEU (Beats Rueckmeldung: "die Eigenverbrauchsoptimierung ist
         # negativ, wieso ist es in der Grafik dann positiv?"): ROOT CAUSE --

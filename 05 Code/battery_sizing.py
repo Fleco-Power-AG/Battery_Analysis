@@ -207,6 +207,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import time
 import warnings
 
 import matplotlib
@@ -219,6 +220,7 @@ import numpy as np
 import pandas as pd
 
 import output_create
+import konsole
 
 # NEU (siehe input_prep.py/battery_optimization.py): dieselbe gezielte
 # Unterdrueckung der harmlosen openpyxl-"Data Validation"-Warnung, die sonst
@@ -603,7 +605,13 @@ def _kombination_rechnen(
     return zeile
 
 
-def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.DataFrame:
+def _punkt_leise(logpfad, *args):
+    """Ein Rasterpunkt mit kompakter Konsole: Details (Solver etc.) nur ins Log."""
+    with konsole.leise(logpfad):
+        return _kombination_rechnen(*args)
+
+
+def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1, logpfad: str | None = None) -> pd.DataFrame:
     """Fuehrt den kompletten Raster-Sweep durch: Parameter/Profile EINMAL
     ohne Solve einlesen (fuer die Raster-Bestimmung, siehe baue_raster()),
     dann pro Rasterpunkt (Kapazitaetsstufe x C-Rate) einen vollen Solve via
@@ -628,94 +636,96 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
     haette) -- siehe Konsolenausgabe fuer Details."""
     import battery_optimization  # lazy, siehe Modulkopf
 
-    print("Lese Parameter/Zeitreihen (ohne Solve, nur fuer Raster-Bestimmung) ...")
-    params_original, zeitreihen_original = battery_optimization.read_inputs(input_lp_path)
-    pv_profile = battery_optimization.build_pv_profile(params_original, zeitreihen_original)
-    last_profile = battery_optimization.build_last_profile(params_original, zeitreihen_original)
+    # Vorbereitung (Parameter, Raster, Kosten): Details nur ins Log, in der Konsole eine Zeile
+    with konsole.leise(logpfad):
+        print("Lese Parameter/Zeitreihen (ohne Solve, nur fuer Raster-Bestimmung) ...")
+        params_original, zeitreihen_original = battery_optimization.read_inputs(input_lp_path)
+        pv_profile = battery_optimization.build_pv_profile(params_original, zeitreihen_original)
+        last_profile = battery_optimization.build_last_profile(params_original, zeitreihen_original)
 
-    kapazitaeten, basis_kwh = baue_raster_um_batterie(
-        params_original.get("kapazitaet"), pv_profile, last_profile, battery_optimization.DT_HOURS)
+        kapazitaeten, basis_kwh = baue_raster_um_batterie(
+            params_original.get("kapazitaet"), pv_profile, last_profile, battery_optimization.DT_HOURS)
 
-    # NEU (Beat, 22.9.2026): Parameter!C41 kann "gegebenenfalls" einen FIXEN
-    # Total-Investitionsbetrag (CHF) vorgeben statt des CHF/kWh-Ansatzes (C34)
-    # -- siehe battery_optimization.capital_costs(). Dieser fixe Betrag gilt
-    # aber nur fuer die im Excel angegebene ORIGINAL-Kapazitaet; fuer den
-    # Sweep (andere Kapazitaeten pro Rasterpunkt) leiten wir daraus einen
-    # EFFEKTIVEN CHF/kWh-Satz her (Fixbetrag / Original-Kapazitaet) und
-    # rechnen damit fuer jeden Rasterpunkt einzeln neu (siehe
-    # _kombination_rechnen(), die "investitionskosten_fix" je Rasterpunkt
-    # explizit leert, damit der fixe Original-Betrag nicht faelschlich fuer
-    # ALLE Groessen uebernommen wird).
-    kapazitaet_original = params_original["kapazitaet"]
-    investitionskosten_fix = params_original.get("investitionskosten_fix")
-    if (
-        isinstance(investitionskosten_fix, (int, float))
-        and investitionskosten_fix > 1e-9
-        and kapazitaet_original > 1e-9
-    ):
-        invest_kosten_kwh_fallback = investitionskosten_fix / kapazitaet_original
-        capex_original = float(investitionskosten_fix)
-        print(
-            f"  HINWEIS: Investitionskosten sind im Input-Excel als fixer Totalbetrag "
-            f"angegeben (Parameter!C41 = {investitionskosten_fix:,.0f} CHF) statt als "
-            f"CHF/kWh-Ansatz. Fuer den Sweep wird daraus ein effektiver Satz von "
-            f"{invest_kosten_kwh_fallback:,.2f} CHF/kWh hergeleitet ({investitionskosten_fix:,.0f} CHF / "
-            f"{kapazitaet_original:,.0f} kWh Original-Kapazitaet) und je Rasterpunkt neu skaliert."
-        )
-    else:
-        invest_kosten_kwh_fallback = params_original["invest_kosten_kwh"]
-        capex_original = kapazitaet_original * invest_kosten_kwh_fallback
-
-    # NEU (Beat, 24.9.2026: "batteriekosten anpassen, fuer 0.25 C 400CHF/kWh,
-    # 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh") -- fuer JEDE im Sweep
-    # verwendete C-Rate wird hier EINMAL der passende CHF/kWh-Preis aufgeloest
-    # (aus INVEST_KOSTEN_KWH_JE_C_RATE, sonst Fallback auf den Excel-/
-    # C41-Wert oben, mit Warnung). Wird unten pro Rasterpunkt weitergegeben,
-    # statt eines einzigen, fuer alle C-Raten gleichen Preises.
-    invest_kosten_kwh_je_c_rate = {}
-    for c in C_RATEN:
-        if c in INVEST_KOSTEN_KWH_JE_C_RATE:
-            invest_kosten_kwh_je_c_rate[c] = INVEST_KOSTEN_KWH_JE_C_RATE[c]
-        else:
-            print(f"  HINWEIS: kein Preis in INVEST_KOSTEN_KWH_JE_C_RATE fuer C-Rate {c} "
-                  f"hinterlegt -- verwende Fallback {invest_kosten_kwh_fallback:,.2f} CHF/kWh.")
-            invest_kosten_kwh_je_c_rate[c] = invest_kosten_kwh_fallback
-    print(f"  Batteriekosten je C-Rate: " + ", ".join(
-        f"{c:g}C = {invest_kosten_kwh_je_c_rate[c]:,.0f} CHF/kWh" for c in C_RATEN
-    ))
-
-    if UNTERHALT_PROPORTIONAL_SKALIEREN and capex_original > 1e-9:
-        unterhalt_pct_von_capex = params_original["unterhalt_kosten"] / capex_original
-        print(
-            f"  Unterhaltkosten werden proportional zur Investitionssumme skaliert "
-            f"({unterhalt_pct_von_capex * 100:.2f}% des Capex, hergeleitet aus dem "
-            f"Original-Excel-Wert {params_original['unterhalt_kosten']:,.0f} CHF/Jahr bei "
-            f"{capex_original:,.0f} CHF Capex)."
-        )
-    else:
-        unterhalt_pct_von_capex = None
-        print(
-            f"  Unterhaltkosten bleiben FIX bei {params_original['unterhalt_kosten']:,.0f} CHF/Jahr "
-            f"fuer alle Rasterpunkte (UNTERHALT_PROPORTIONAL_SKALIEREN=False)."
-        )
-
-    def _ergebnis_zeile_drucken(nr: int, gesamt: int, kap: float, c_rate: float, zeile: dict) -> None:
-        praefix = f"[{nr}/{gesamt}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate}"
-        if zeile["fehler"]:
-            print(f"{praefix}: FEHLER: {zeile['fehler']}")
-        else:
-            kv_txt = (
-                f"{zeile['kapitalverzinsung_pct']:.1f}%"
-                if zeile["kapitalverzinsung_pct"] is not None else "n/a"
-            )
-            amort_txt = (
-                f"{zeile['amortisationsdauer_jahre']:.1f} Jahre"
-                if zeile.get("amortisationsdauer_jahre") is not None else "n/a"
-            )
+        # NEU (Beat, 22.9.2026): Parameter!C41 kann "gegebenenfalls" einen FIXEN
+        # Total-Investitionsbetrag (CHF) vorgeben statt des CHF/kWh-Ansatzes (C34)
+        # -- siehe battery_optimization.capital_costs(). Dieser fixe Betrag gilt
+        # aber nur fuer die im Excel angegebene ORIGINAL-Kapazitaet; fuer den
+        # Sweep (andere Kapazitaeten pro Rasterpunkt) leiten wir daraus einen
+        # EFFEKTIVEN CHF/kWh-Satz her (Fixbetrag / Original-Kapazitaet) und
+        # rechnen damit fuer jeden Rasterpunkt einzeln neu (siehe
+        # _kombination_rechnen(), die "investitionskosten_fix" je Rasterpunkt
+        # explizit leert, damit der fixe Original-Betrag nicht faelschlich fuer
+        # ALLE Groessen uebernommen wird).
+        kapazitaet_original = params_original["kapazitaet"]
+        investitionskosten_fix = params_original.get("investitionskosten_fix")
+        if (
+            isinstance(investitionskosten_fix, (int, float))
+            and investitionskosten_fix > 1e-9
+            and kapazitaet_original > 1e-9
+        ):
+            invest_kosten_kwh_fallback = investitionskosten_fix / kapazitaet_original
+            capex_original = float(investitionskosten_fix)
             print(
-                f"{praefix}: Amortisationsdauer {amort_txt}, Gewinn/Verlust "
-                f"{zeile['gewinn_verlust_chf_jahr']:,.0f} CHF/Jahr, Kapitalverzinsung {kv_txt}"
+                f"  HINWEIS: Investitionskosten sind im Input-Excel als fixer Totalbetrag "
+                f"angegeben (Parameter!C41 = {investitionskosten_fix:,.0f} CHF) statt als "
+                f"CHF/kWh-Ansatz. Fuer den Sweep wird daraus ein effektiver Satz von "
+                f"{invest_kosten_kwh_fallback:,.2f} CHF/kWh hergeleitet ({investitionskosten_fix:,.0f} CHF / "
+                f"{kapazitaet_original:,.0f} kWh Original-Kapazitaet) und je Rasterpunkt neu skaliert."
             )
+        else:
+            invest_kosten_kwh_fallback = params_original["invest_kosten_kwh"]
+            capex_original = kapazitaet_original * invest_kosten_kwh_fallback
+
+        # NEU (Beat, 24.9.2026: "batteriekosten anpassen, fuer 0.25 C 400CHF/kWh,
+        # 0.5C 500 CHF/kWh und fuer 1C 700 CHF/kWh") -- fuer JEDE im Sweep
+        # verwendete C-Rate wird hier EINMAL der passende CHF/kWh-Preis aufgeloest
+        # (aus INVEST_KOSTEN_KWH_JE_C_RATE, sonst Fallback auf den Excel-/
+        # C41-Wert oben, mit Warnung). Wird unten pro Rasterpunkt weitergegeben,
+        # statt eines einzigen, fuer alle C-Raten gleichen Preises.
+        invest_kosten_kwh_je_c_rate = {}
+        for c in C_RATEN:
+            if c in INVEST_KOSTEN_KWH_JE_C_RATE:
+                invest_kosten_kwh_je_c_rate[c] = INVEST_KOSTEN_KWH_JE_C_RATE[c]
+            else:
+                print(f"  HINWEIS: kein Preis in INVEST_KOSTEN_KWH_JE_C_RATE fuer C-Rate {c} "
+                      f"hinterlegt -- verwende Fallback {invest_kosten_kwh_fallback:,.2f} CHF/kWh.")
+                invest_kosten_kwh_je_c_rate[c] = invest_kosten_kwh_fallback
+        print(f"  Batteriekosten je C-Rate: " + ", ".join(
+            f"{c:g}C = {invest_kosten_kwh_je_c_rate[c]:,.0f} CHF/kWh" for c in C_RATEN
+        ))
+
+        if UNTERHALT_PROPORTIONAL_SKALIEREN and capex_original > 1e-9:
+            unterhalt_pct_von_capex = params_original["unterhalt_kosten"] / capex_original
+            print(
+                f"  Unterhaltkosten werden proportional zur Investitionssumme skaliert "
+                f"({unterhalt_pct_von_capex * 100:.2f}% des Capex, hergeleitet aus dem "
+                f"Original-Excel-Wert {params_original['unterhalt_kosten']:,.0f} CHF/Jahr bei "
+                f"{capex_original:,.0f} CHF Capex)."
+            )
+        else:
+            unterhalt_pct_von_capex = None
+            print(
+                f"  Unterhaltkosten bleiben FIX bei {params_original['unterhalt_kosten']:,.0f} CHF/Jahr "
+                f"fuer alle Rasterpunkte (UNTERHALT_PROPORTIONAL_SKALIEREN=False)."
+            )
+    print(f"  Raster: {len(kapazitaeten)} Kapazitäten ({konsole.zahl(min(kapazitaeten))} bis "
+          f"{konsole.zahl(max(kapazitaeten))} kWh) x C-Raten {', '.join(f'{c:g}C' for c in C_RATEN)}")
+
+    def _ergebnis_zeile_drucken(nr: int, gesamt: int, kap: float, c_rate: float, zeile: dict,
+                                t0: float | None = None) -> None:
+        if zeile.get("fehler"):
+            ergebnis = f"FEHLER: {str(zeile['fehler'])[:80]}"
+        else:
+            kv = zeile.get("kapitalverzinsung_pct")
+            kv_txt = f"{kv:5.1f} %" if kv is not None else "  n/a"
+            ergebnis = f"Verzinsung {kv_txt}, Gewinn {konsole.zahl(zeile['gewinn_verlust_chf_jahr']):>9} CHF/J."
+        zeit = ""
+        if t0 is not None:
+            el = time.time() - t0
+            zeit = f"  | {konsole.dauer(el)}" + (f", Rest ~{konsole.dauer(el / nr * (gesamt - nr))}"
+                                                 if nr < gesamt else "")
+        print(f"  [{nr:>2}/{gesamt}] {konsole.zahl(kap):>6} kWh / {konsole.zahl(kap * c_rate):>6} kW "
+              f"({c_rate:g}C): {ergebnis}{zeit}", flush=True)
 
     def _punkte_rechnen(punkte: list[tuple[float, float]]) -> list[dict]:
         """Rechnet eine Liste von (Kapazitaet, C-Rate)-Rasterpunkten durch --
@@ -730,30 +740,29 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
         gesamt = len(punkte)
         workers = max(1, min(parallel_workers, gesamt))
         ergebnisse = []
+        t0 = time.time()
         if workers <= 1:
             # Unveraendertes, sequenzielles Verhalten (z.B. bei --parallel 1,
             # oder wenn nur 1 Rasterpunkt existiert) -- einfacher zu
             # debuggen, da die Konsolenausgabe strikt in Raster-Reihenfolge
             # erscheint.
             for i, (kap, c_rate) in enumerate(punkte, start=1):
-                print(f"[{i}/{gesamt}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate} "
-                      f"(Leistung={c_rate * kap:,.0f} kW, "
-                      f"{invest_kosten_kwh_je_c_rate[c_rate]:,.0f} CHF/kWh) ...")
-                zeile = _kombination_rechnen(
-                    input_lp_path, kap, c_rate, solver, invest_kosten_kwh_je_c_rate[c_rate],
-                    unterhalt_pct_von_capex,
-                    params_original=params_original, zeitreihen_original=zeitreihen_original,
+                if konsole.VOLL:
+                    print(f"[{i}/{gesamt}] Kapazitaet={kap:,.0f} kWh, C-Rate={c_rate} "
+                          f"(Leistung={c_rate * kap:,.0f} kW, "
+                          f"{invest_kosten_kwh_je_c_rate[c_rate]:,.0f} CHF/kWh) ...")
+                zeile = _punkt_leise(
+                    logpfad, input_lp_path, kap, c_rate, solver, invest_kosten_kwh_je_c_rate[c_rate],
+                    unterhalt_pct_von_capex, params_original, zeitreihen_original,
                 )
-                _ergebnis_zeile_drucken(i, gesamt, kap, c_rate, zeile)
+                _ergebnis_zeile_drucken(i, gesamt, kap, c_rate, zeile, t0)
                 ergebnisse.append(zeile)
         else:
-            print(f"  Rechne mit {workers} parallelen Prozessen "
-                  f"(einer je CPU-Kern, minus 1) -- Reihenfolge der Meldungen unten "
-                  f"entspricht der Fertigstellung, nicht der Raster-Reihenfolge.\n")
+            print(f"  Rechne mit {workers} parallelen Prozessen (Reihenfolge = Fertigstellung)")
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
                 future_zu_punkt = {
                     pool.submit(
-                        _kombination_rechnen, input_lp_path, kap, c_rate, solver,
+                        _punkt_leise, logpfad, input_lp_path, kap, c_rate, solver,
                         invest_kosten_kwh_je_c_rate[c_rate], unterhalt_pct_von_capex,
                         params_original, zeitreihen_original,
                     ): (kap, c_rate)
@@ -773,16 +782,13 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
                             "leistung_kw": round(c_rate * kap, 3),
                             "fehler": f"{type(exc).__name__}: {exc}",
                         }
-                    _ergebnis_zeile_drucken(nr, gesamt, kap, c_rate, zeile)
+                    _ergebnis_zeile_drucken(nr, gesamt, kap, c_rate, zeile, t0)
                     ergebnisse.append(zeile)
         return ergebnisse
 
     rasterpunkte = [(kap, c) for kap in kapazitaeten for c in C_RATEN]
-    print(
-        f"\n{len(rasterpunkte)} Rasterpunkte ({len(kapazitaeten)} Kapazitaeten x "
-        f"{len(C_RATEN)} C-Raten) -- jeder ist ein vollstaendiger oemof.solph-Solve, "
-        f"das kann eine Weile dauern."
-    )
+    print(f"\n  {len(rasterpunkte)} Rasterpunkte ({len(kapazitaeten)} Kapazitäten x {len(C_RATEN)} C-Raten), "
+          "je eine volle Jahresoptimierung:")
     zeilen = _punkte_rechnen(rasterpunkte)
 
     # NEU (Beat, 5.11.2026): automatische Erweiterung ausschliesslich nach der
@@ -815,9 +821,9 @@ def sweep(input_lp_path: str, solver: str, parallel_workers: int = 1) -> pd.Data
                 break
             runden[richtung] += 1
             print(f"\n  HINWEIS: beste Kapitalverzinsung ({beste['kapitalverzinsung_pct']:.1f} %) liegt am "
-                  f"{'oberen' if richtung == 'oben' else 'unteren'} Rand ({beste['kapazitaet_kwh']:,.0f} kWh). "
+                  f"{'oberen' if richtung == 'oben' else 'unteren'} Rand ({konsole.zahl(beste['kapazitaet_kwh'])} kWh). "
                   f"Erweiterung nach {richtung} {runden[richtung]}/{KAPAZITAETS_MAX_ERWEITERUNGEN}: "
-                  f"teste zusätzlich {neu:,.0f} kWh ...")
+                  f"teste zusätzlich {konsole.zahl(neu)} kWh ...")
             kapazitaeten = sorted(set(kapazitaeten) | {neu})
             zeilen.extend(_punkte_rechnen([(neu, c) for c in C_RATEN]))
 
@@ -1085,25 +1091,29 @@ def main(argv=None):
     sweep_xlsx_path = os.path.join(output_dir, f"Sweep_{rest}.xlsx" if rest else "Sweep.xlsx")
     sweep_pdf_path = os.path.join(data_dir, f"Sweep_{rest}.pdf" if rest else "Sweep.pdf")
 
+    log = konsole.log_neu(os.path.join(output_dir, f"konsole_sweep_{rest or 'input'}.log"),
+                          f"Sizing-Sweep {input_path}")
     print("=" * 70)
-    print("Optimale Batteriegroesse -- Raster-Sweep")
-    print(f"  Input:        {input_path}")
-    print(f"  input_lp:     {input_lp_path}")
-    print(f"  Sweep-Excel:  {sweep_xlsx_path}")
-    print(f"  Heatmap-PDF:  {sweep_pdf_path}")
+    print(f"Sizing-Sweep: {os.path.basename(input_path)}")
+    print(f"  Ordner: {data_dir}")
+    if not konsole.VOLL:
+        print(f"  Details und Solver-Log: Output\\{os.path.basename(log)}")
     print("=" * 70)
 
-    print("\n=== Schritt 1: Input aufbereiten (input_prep, EINMAL fuer alle Rasterpunkte) ===")
-    input_prep.main(
-        input_path=input_path, output_path=input_lp_path, fetch_swissix=not args.kein_swissix_fetch,
-    )
+    with konsole.schritt(1, 3, "Inputs aufbereiten", log):
+        input_prep.main(
+            input_path=input_path, output_path=input_lp_path, fetch_swissix=not args.kein_swissix_fetch,
+        )
 
-    print("\n=== Schritt 2: Raster-Sweep (ein voller Solve je Rasterpunkt) ===")
-    df = sweep(input_lp_path, args.solver, parallel_workers=args.parallel)
+    print("  [2/3] Raster-Sweep")
+    t_sweep = time.time()
+    df = sweep(input_lp_path, args.solver, parallel_workers=args.parallel, logpfad=log)
+    print(f"        Sweep fertig ({konsole.dauer(time.time() - t_sweep)})")
 
-    print("\n=== Schritt 3: Ergebnis-Excel + Heatmap-PDF schreiben ===")
-    speichere_ergebnis_excel(df, sweep_xlsx_path)
-    baue_heatmap_pdf(df, sweep_pdf_path)
+    with konsole.schritt(3, 3, "Sweep-Excel und Heatmap-PDF schreiben", log):
+        speichere_ergebnis_excel(df, sweep_xlsx_path)
+        baue_heatmap_pdf(df, sweep_pdf_path)
+    print(f"  Heatmap: {os.path.basename(sweep_pdf_path)}")
 
     anzahl_fehler = int(df["fehler"].notna().sum())
     if anzahl_fehler:

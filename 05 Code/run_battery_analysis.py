@@ -57,6 +57,7 @@ import sys
 import input_prep
 import battery_optimization
 import output_create
+import konsole
 
 
 def pick_file_dialog() -> str:
@@ -150,76 +151,60 @@ def main(argv=None):
     result_path = os.path.join(output_dir, output_create.derive_result_filename(input_path))
     pdf_path = os.path.join(data_dir, output_create.derive_pdf_filename(input_path))
 
+    log = konsole.log_neu(
+        os.path.join(output_dir, f"konsole_{os.path.splitext(os.path.basename(input_path))[0]}.log"),
+        f"Batterieanalyse {input_path}")
     print("=" * 70)
-    print("Batterieanalyse")
-    print(f"  Input:      {input_path}")
-    print(f"  input_lp:   {input_lp_path}")
-    print(f"  Ergebnis:   {result_path}")
-    print(f"  PDF-Report: {pdf_path}")
+    print(f"Batterieanalyse: {os.path.basename(input_path)}")
+    print(f"  Ordner: {data_dir}")
+    if not konsole.VOLL:
+        print(f"  Details und Solver-Log: Output\\{os.path.basename(log)}")
     print("=" * 70)
 
-    print("\n=== Schritt 1/2: Input aufbereiten (input_prep) ===")
-    input_prep.main(
-        input_path=input_path,
-        output_path=input_lp_path,
-        fetch_swissix=not args.kein_swissix_fetch,
-    )
-
-    print("\n=== Schritt 2/2: Optimierung (battery_optimization) ===")
-    module, ts, anteile, zeitreihen, params, pv_profile, last_profile = battery_optimization.main(
-        input_path=input_lp_path, solver=args.solver
-    )
-
-    print("\n=== Output-Kontrolle schreiben (output_create) ===")
-    zeitreihen_tabelle, modul_tabelle = output_create.save_output_excel(
-        result_path, module, ts, anteile, zeitreihen, params, pv_profile, last_profile,
-    )
-
-    # NEU (Beat, 17.9.2026: "wir haben ja die Option PV bei Negativpreisen
-    # auszuschalten. Das hat einen Wert. Können wir das in die Auswertung mit
-    # hineinnehmen?"; VEREINFACHT 18.9.2026: "ich hätte gerne dass nur 1 Wert
-    # gezeigt wird: Wert der Abschaltung ohne Batterie"): Wert-Analyse der
-    # PV-Abschaltung bei Negativpreisen, als EIGENE Zusatzanalyse fuer Seite 2
-    # des PDF-Reports -- ausdruecklich NICHT Teil der Wirtschaftlichkeits-
-    # rechnung oben (die rechnet weiterhin nur mit der Konfiguration aus der
-    # Inputs.xlsx, wie bisher). Rein analytisch (siehe
-    # output_create.compute_pv_abriegelung_wert_ohne_batterie()), KEIN
-    # zusaetzlicher Solve noetig. Wird komplett uebersprungen, wenn keine
-    # PV-Anlage vorhanden ist (dann gibt es nichts abzuriegeln).
-    #
-    # Eine fruehere Version rechnete hier zusaetzlich einen ZWEITEN, vollstaen-
-    # digen oemof.solph-Solve mit umgekehrter PV-Abschaltung-Einstellung (fuer
-    # eine "mit Batterie"/"Mehrwert der Batterie"-Zahl, ueber
-    # battery_optimization.main(params_override=...)) -- das hat die Solve-
-    # Zeit fuer diesen Teil der Auswertung verdoppelt. Beat wollte im Report
-    # nur noch die analytische "ohne Batterie"-Zahl sehen, daher entfaellt der
-    # zweite Solve jetzt komplett (siehe output_create.build_pdf_report()'s
-    # pv_abriegelung-Docstring).
-    pv_vorhanden = float(params.get("dc_leistung") or 0.0) > 0.0
-    pv_abriegelung_analyse = {"pv_vorhanden": pv_vorhanden}
-    if pv_vorhanden:
-        print("\n=== PV-Abriegelung: Wert-Analyse (ohne Batterie) ===")
-        ohne_batterie = output_create.compute_pv_abriegelung_wert_ohne_batterie(
-            pv_profile, last_profile, zeitreihen, dt_hours=battery_optimization.DT_HOURS
+    with konsole.schritt(1, 4, "Inputs aufbereiten (Tarife, Preise, Profile)", log):
+        input_prep.main(
+            input_path=input_path,
+            output_path=input_lp_path,
+            fetch_swissix=not args.kein_swissix_fetch,
         )
-        pv_abriegelung_analyse["ohne_batterie"] = ohne_batterie
-        print(f"  Wert der Abschaltung (ohne Batterie): {ohne_batterie['wert_abriegelung_chf']:,.0f} CHF")
 
-    print("\n=== PDF-Report erstellen (output_create) ===")
-    # entladeenergie_kwh mitgeben, damit die Degradationskosten (siehe
-    # battery_optimization.DEGRADATIONSKOSTEN_CHF_PRO_KWH), die schon IN der
-    # LP-Zielfunktion beruecksichtigt sind, auch im PDF-Report als eigene
-    # Ausgaben-Zeile auftauchen (sonst wuerden "Total Einnahmen - Total
-    # Ausgaben" nicht mit dem tatsaechlichen Optimierungsergebnis uebereinstimmen).
-    entladeenergie_kwh = float(ts["dis"].sum() * battery_optimization.DT_HOURS)
-    kapitalkosten = battery_optimization.capital_costs(params, entladeenergie_kwh=entladeenergie_kwh)
-    output_create.build_pdf_report(
-        pdf_path, module, ts, anteile, zeitreihen, params, pv_profile, last_profile, kapitalkosten,
-        pv_abriegelung=pv_abriegelung_analyse,
-    )
+    with konsole.schritt(2, 4, "Optimierung (oemof/CBC, 1 Jahr in 15-Min-Schritten)", log):
+        module, ts, anteile, zeitreihen, params, pv_profile, last_profile = battery_optimization.main(
+            input_path=input_lp_path, solver=args.solver
+        )
 
-    print(f"\nFertig. Ergebnis gespeichert unter: {result_path}")
-    print(f"PDF-Report gespeichert unter: {pdf_path}")
+    with konsole.schritt(3, 4, "Ergebnis-Excel schreiben", log):
+        zeitreihen_tabelle, modul_tabelle = output_create.save_output_excel(
+            result_path, module, ts, anteile, zeitreihen, params, pv_profile, last_profile,
+        )
+
+    with konsole.schritt(4, 4, "PDF-Bericht erstellen", log):
+        # Wert der PV-Abregelung bei Negativpreisen (ohne Batterie), rein analytisch -- siehe
+        # output_create.compute_pv_abriegelung_wert_ohne_batterie(). Nicht Teil der Wirtschaftlichkeit.
+        pv_vorhanden = float(params.get("dc_leistung") or 0.0) > 0.0
+        pv_abriegelung_analyse = {"pv_vorhanden": pv_vorhanden}
+        if pv_vorhanden:
+            ohne_batterie = output_create.compute_pv_abriegelung_wert_ohne_batterie(
+                pv_profile, last_profile, zeitreihen, dt_hours=battery_optimization.DT_HOURS
+            )
+            pv_abriegelung_analyse["ohne_batterie"] = ohne_batterie
+            print(f"  Wert der Abschaltung (ohne Batterie): {ohne_batterie['wert_abriegelung_chf']:,.0f} CHF")
+        # entladeenergie_kwh mitgeben, damit die Degradationskosten (schon in der LP-Zielfunktion)
+        # auch im PDF-Report als eigene Ausgaben-Zeile erscheinen.
+        entladeenergie_kwh = float(ts["dis"].sum() * battery_optimization.DT_HOURS)
+        kapitalkosten = battery_optimization.capital_costs(params, entladeenergie_kwh=entladeenergie_kwh)
+        output_create.build_pdf_report(
+            pdf_path, module, ts, anteile, zeitreihen, params, pv_profile, last_profile, kapitalkosten,
+            pv_abriegelung=pv_abriegelung_analyse,
+        )
+
+    try:
+        total = sum(float(v) for v in module.values())
+        print(f"\n  Operativer Ertrag: {konsole.zahl(total)} CHF/Jahr")
+    except Exception:  # noqa: BLE001 -- reine Zusatzinfo
+        pass
+    print(f"  Bericht:  {os.path.basename(pdf_path)}")
+    print(f"  Ergebnis: Output\\{os.path.basename(result_path)}")
     return module, ts, anteile, zeitreihen_tabelle, modul_tabelle
 
 
